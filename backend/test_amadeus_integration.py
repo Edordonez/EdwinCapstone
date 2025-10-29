@@ -75,11 +75,11 @@ class AmadeusIntegrationTester:
             departure_date = (datetime.now() + timedelta(days=30)).strftime("%Y-%m-%d")
             return_date = (datetime.now() + timedelta(days=37)).strftime("%Y-%m-%d")
             
-            print(f"Searching flights: {origin} → {destination}")
+            print(f"Searching flights: {origin} to {destination}")
             print(f"Departure: {departure_date}, Return: {return_date}")
             
             # Call Amadeus API
-            result = await self.amadeus_service.search_flights(
+            result = self.amadeus_service.search_flights(
                 origin=origin,
                 destination=destination,
                 departure_date=departure_date,
@@ -122,7 +122,7 @@ class AmadeusIntegrationTester:
             print(f"Check-in: {check_in}, Check-out: {check_out}")
             
             # Call Amadeus API
-            result = await self.amadeus_service.search_hotels(
+            result = self.amadeus_service.search_hotels(
                 city_code=city_code,
                 check_in=check_in,
                 check_out=check_out,
@@ -164,7 +164,7 @@ class AmadeusIntegrationTester:
             print(f"Radius: {radius} km")
             
             # Call Amadeus API
-            result = await self.amadeus_service.search_activities(
+            result = self.amadeus_service.search_activities(
                 latitude=latitude,
                 longitude=longitude,
                 radius=radius
@@ -204,7 +204,7 @@ class AmadeusIntegrationTester:
             print(f"Max price: ${max_price}, Departure: {departure_date}")
             
             # Call Amadeus API
-            result = await self.amadeus_service.get_flight_inspiration(
+            result = self.amadeus_service.get_flight_inspiration(
                 origin=origin,
                 max_price=max_price,
                 departure_date=departure_date
@@ -240,7 +240,7 @@ class AmadeusIntegrationTester:
             print(f"Searching locations for: {keyword}")
             
             # Call Amadeus API
-            result = await self.amadeus_service.get_airport_city_search(keyword=keyword)
+            result = self.amadeus_service.get_airport_city_search(keyword=keyword)
             
             if result.get('error'):
                 print(f"[ERROR] API Error: {result['error']}")
@@ -345,7 +345,7 @@ class AmadeusIntegrationTester:
         try:
             # Test with invalid parameters
             print("Testing with invalid flight search...")
-            result = await self.amadeus_service.search_flights(
+            result = self.amadeus_service.search_flights(
                 origin="INVALID",
                 destination="INVALID", 
                 departure_date="invalid-date",
@@ -396,7 +396,7 @@ async def main():
     await tester.run_all_tests()
     
     # Clean up
-    await tester.amadeus_service.close()
+    tester.amadeus_service.close()
 
 
 if __name__ == "__main__":

@@ -471,6 +471,140 @@ function renderMarkdown(content) {
   return elements;
 }
 
+function renderCellContent(cell, rowIndex, cellIndex) {
+  if (!cell) return '';
+  
+  // Check if it's a markdown link [text](url)
+  const linkMatch = cell.match(/^\[([^\]]+)\]\(([^)]+)\)$/);
+  if (linkMatch) {
+    const [, text, url] = linkMatch;
+    
+    // Special styling for "Book Now" links
+    if (text === 'Book Now') {
+      return (
+        <a
+          href={url}
+          target="_blank"
+          rel="noopener noreferrer"
+          style={{
+            color: '#ffffff',
+            textDecoration: 'none',
+            fontWeight: '600',
+            padding: '6px 12px',
+            backgroundColor: '#00ADEF',
+            borderRadius: '6px',
+            display: 'inline-block',
+            fontSize: '11px',
+            textAlign: 'center',
+            minWidth: '70px',
+            boxShadow: '0 2px 4px rgba(0, 173, 239, 0.3)',
+            transition: 'all 0.2s ease',
+            border: 'none'
+          }}
+          onMouseEnter={(e) => {
+            e.target.style.backgroundColor = '#006AAF';
+            e.target.style.transform = 'translateY(-1px)';
+            e.target.style.boxShadow = '0 4px 8px rgba(0, 173, 239, 0.4)';
+          }}
+          onMouseLeave={(e) => {
+            e.target.style.backgroundColor = '#00ADEF';
+            e.target.style.transform = 'translateY(0)';
+            e.target.style.boxShadow = '0 2px 4px rgba(0, 173, 239, 0.3)';
+          }}
+        >
+          {text}
+        </a>
+      );
+    }
+    
+    // Regular link styling for other links
+    return (
+      <a
+        href={url}
+        target="_blank"
+        rel="noopener noreferrer"
+        style={{
+          color: '#004C8C',
+          textDecoration: 'underline',
+          fontWeight: '500',
+          padding: '4px 8px',
+          backgroundColor: '#f0f9ff',
+          borderRadius: '4px',
+          display: 'inline-block',
+          fontSize: '12px'
+        }}
+      >
+        {text}
+      </a>
+    );
+  }
+  
+  // Check if it's a flight code (alphanumeric with 2-3 letters followed by numbers)
+  const flightCodeMatch = cell.match(/^[A-Z]{2,3}\d{3,4}$/);
+  if (flightCodeMatch) {
+    return (
+      <span style={{
+        fontFamily: 'monospace',
+        fontSize: '13px',
+        fontWeight: '500',
+        backgroundColor: '#f8fafc',
+        padding: '2px 6px',
+        borderRadius: '3px',
+        border: '1px solid #e2e8f0'
+      }}>
+        {cell}
+      </span>
+    );
+  }
+  
+  // Check if it's a price (starts with $)
+  if (cell.startsWith('$')) {
+    return (
+      <span style={{
+        fontWeight: '600',
+        color: '#059669'
+      }}>
+        {cell}
+      </span>
+    );
+  }
+  
+  // Check if it's "Non-stop"
+  if (cell === 'Non-stop') {
+    return (
+      <span style={{
+        backgroundColor: '#dcfce7',
+        color: '#166534',
+        padding: '2px 6px',
+        borderRadius: '12px',
+        fontSize: '11px',
+        fontWeight: '500'
+      }}>
+        {cell}
+      </span>
+    );
+  }
+  
+  // Check if it's a stop count (e.g., "1 stop", "2 stops")
+  if (cell.match(/^\d+\s+stop(s)?$/)) {
+    return (
+      <span style={{
+        backgroundColor: '#fef3c7',
+        color: '#92400e',
+        padding: '2px 6px',
+        borderRadius: '12px',
+        fontSize: '11px',
+        fontWeight: '500'
+      }}>
+        {cell}
+      </span>
+    );
+  }
+  
+  // Default rendering
+  return cell;
+}
+
 function renderTable(rows) {
   if (rows.length === 0) return null;
   
@@ -493,12 +627,13 @@ function renderTable(rows) {
               {row.map((cell, cellIndex) => (
                 <td key={cellIndex} style={{ 
                   padding: '8px 12px', 
-                  textAlign: cellIndex === 0 ? 'left' : 'left',
+                  textAlign: cellIndex === 0 ? 'center' : 'left', // Center align the first column (Book Now)
                   borderRight: cellIndex < row.length - 1 ? '1px solid var(--border)' : 'none',
                   fontWeight: rowIndex === 0 ? '600' : 'normal',
-                  color: rowIndex === 0 ? '#004C8C' : 'inherit'
+                  color: rowIndex === 0 ? '#004C8C' : 'inherit',
+                  verticalAlign: 'middle' // Center vertically for better button alignment
                 }}>
-                  {cell}
+                  {renderCellContent(cell, rowIndex, cellIndex)}
                 </td>
               ))}
             </tr>

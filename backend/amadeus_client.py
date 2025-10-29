@@ -21,7 +21,7 @@ class AmadeusClient:
         self.amadeus = Client(
             client_id=api_key,
             client_secret=api_secret,
-            hostname='test'  # Use 'test' for testing environment, 'production' for live
+            hostname='production'  # Use 'test' for testing environment, 'production' for live
         )
     
     def search_flights(self, origin: str, destination: str, departure_date: str, 

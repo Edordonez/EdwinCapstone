@@ -3,6 +3,7 @@ Amadeus API Service for travel data integration
 """
 import os
 import httpx
+import requests
 import logging
 from typing import Dict, List, Optional, Any
 from datetime import datetime, timedelta
@@ -20,29 +21,34 @@ class AmadeusService:
     def __init__(self):
         self.api_key = os.getenv("AMADEUS_API_KEY")
         self.api_secret = os.getenv("AMADEUS_API_SECRET")
-        self.base_url = os.getenv("AMADEUS_API_BASE", "https://test.api.amadeus.com")
+        
+        # Default to production if not specified, but allow override
+        self.base_url = os.getenv("AMADEUS_API_BASE", "https://api.amadeus.com")
         
         if not self.api_key or not self.api_secret:
             raise ValueError("AMADEUS_API_KEY and AMADEUS_API_SECRET must be set")
         
+        logger.info(f"[AMADEUS] Initialized with base URL: {self.base_url}")
+        
         self._access_token = None
         self._token_expires_at = None
-        self._client = httpx.AsyncClient(timeout=30.0)
+        self._client = None  # Initialize lazily to avoid event loop issues
     
-    async def _get_access_token(self) -> str:
+    def _get_access_token(self) -> str:
         """Get or refresh OAuth2 access token"""
         if self._access_token and self._token_expires_at and datetime.now() < self._token_expires_at:
             return self._access_token
         
         try:
-            response = await self._client.post(
+            response = requests.post(
                 f"{self.base_url}/v1/security/oauth2/token",
                 headers={"Content-Type": "application/x-www-form-urlencoded"},
                 data={
                     "grant_type": "client_credentials",
                     "client_id": self.api_key,
                     "client_secret": self.api_secret
-                }
+                },
+                timeout=30
             )
             response.raise_for_status()
             
@@ -59,32 +65,33 @@ class AmadeusService:
             logger.error(f"Failed to get Amadeus access token: {e}")
             raise Exception(f"Amadeus authentication failed: {e}")
     
-    async def _make_request(self, endpoint: str, params: Dict[str, Any] = None) -> Dict[str, Any]:
+    def _make_request(self, endpoint: str, params: Dict[str, Any] = None) -> Dict[str, Any]:
         """Make authenticated request to Amadeus API"""
-        token = await self._get_access_token()
+        token = self._get_access_token()
         
         try:
-            response = await self._client.get(
+            response = requests.get(
                 f"{self.base_url}{endpoint}",
                 headers={"Authorization": f"Bearer {token}"},
-                params=params or {}
+                params=params or {},
+                timeout=30
             )
             response.raise_for_status()
             return response.json()
             
-        except httpx.HTTPStatusError as e:
+        except requests.exceptions.HTTPError as e:
             logger.error(f"Amadeus API error {e.response.status_code}: {e.response.text}")
             if e.response.status_code == 401:
                 # Token might be expired, try to refresh
                 self._access_token = None
-                return await self._make_request(endpoint, params)
+                return self._make_request(endpoint, params)
             # include body to help diagnose
             raise Exception(f"Amadeus API error: {e.response.status_code} - {e.response.text}")
         except Exception as e:
             logger.error(f"Amadeus API request failed: {e}")
             raise Exception(f"Amadeus API request failed: {e}")
     
-    async def search_flights(self, origin: str, destination: str, departure_date: str, 
+    def search_flights(self, origin: str, destination: str, departure_date: str, 
                            return_date: str = None, adults: int = 1, max_price: int = None) -> Dict[str, Any]:
         """Search for flight offers"""
         params = {
@@ -101,13 +108,13 @@ class AmadeusService:
             params["maxPrice"] = max_price
         
         try:
-            response = await self._make_request("/v2/shopping/flight-offers", params)
+            response = self._make_request("/v2/shopping/flight-offers", params)
             return self._format_flight_response(response)
         except Exception as e:
             logger.error(f"Flight search failed: {e}")
             return {"error": str(e), "flights": []}
     
-    async def get_flight_inspiration(self, origin: str, max_price: int = None, 
+    def get_flight_inspiration(self, origin: str, max_price: int = None, 
                                     departure_date: str = None) -> Dict[str, Any]:
         """Get flight inspiration destinations"""
         params = {"origin": origin}
@@ -118,13 +125,13 @@ class AmadeusService:
             params["departureDate"] = departure_date
         
         try:
-            response = await self._make_request("/v1/shopping/flight-destinations", params)
+            response = self._make_request("/v1/shopping/flight-destinations", params)
             return self._format_inspiration_response(response)
         except Exception as e:
             logger.error(f"Flight inspiration failed: {e}")
             return {"error": str(e), "destinations": []}
     
-    async def search_hotels(self, city_code: str, check_in: str, check_out: str, 
+    def search_hotels(self, city_code: str, check_in: str, check_out: str, 
                            adults: int = 1, radius: int = 50, price_range: str = None) -> Dict[str, Any]:
         """Search for hotel offers"""
         params = {
@@ -139,13 +146,13 @@ class AmadeusService:
             params["priceRange"] = price_range
         
         try:
-            response = await self._make_request("/v2/shopping/hotel-offers", params)
+            response = self._make_request("/v2/shopping/hotel-offers", params)
             return self._format_hotel_response(response)
         except Exception as e:
             logger.error(f"Hotel search failed: {e}")
             return {"error": str(e), "hotels": []}
     
-    async def search_activities(self, latitude: float, longitude: float, radius: int = 20) -> Dict[str, Any]:
+    def search_activities(self, latitude: float, longitude: float, radius: int = 20) -> Dict[str, Any]:
         """Search for activities near coordinates"""
         params = {
             "latitude": latitude,
@@ -154,24 +161,24 @@ class AmadeusService:
         }
         
         try:
-            response = await self._make_request("/v1/shopping/activities", params)
+            response = self._make_request("/v1/shopping/activities", params)
             return self._format_activity_response(response)
         except Exception as e:
             logger.error(f"Activity search failed: {e}")
             return {"error": str(e), "activities": []}
     
-    async def get_airport_city_search(self, keyword: str) -> Dict[str, Any]:
+    def get_airport_city_search(self, keyword: str) -> Dict[str, Any]:
         """Search for airports and cities"""
         params = {"keyword": keyword, "subType": "AIRPORT,CITY"}
         
         try:
-            response = await self._make_request("/v1/reference-data/locations", params)
+            response = self._make_request("/v1/reference-data/locations", params)
             return self._format_location_response(response)
         except Exception as e:
             logger.error(f"Location search failed: {e}")
             return {"error": str(e), "locations": []}
     
-    async def get_cheapest_dates(self, origin: str, destination: str, 
+    def get_cheapest_dates(self, origin: str, destination: str, 
                                departure_date_range: str) -> Dict[str, Any]:
         """Get cheapest flight dates"""
         params = {
@@ -181,7 +188,7 @@ class AmadeusService:
         }
         
         try:
-            response = await self._make_request("/v1/shopping/flight-dates", params)
+            response = self._make_request("/v1/shopping/flight-dates", params)
             return self._format_cheapest_dates_response(response)
         except Exception as e:
             logger.error(f"Cheapest dates search failed: {e}")
@@ -189,8 +196,28 @@ class AmadeusService:
     
     def _format_flight_response(self, response: Dict[str, Any]) -> Dict[str, Any]:
         """Format flight search response"""
+        logger.info(f"[AMADEUS] Raw API response received: {len(response.get('data', []))} offers")
+        
+        # Validate response structure
+        if not response.get("data"):
+            logger.warning("[AMADEUS] No 'data' field in response")
+            return {"flights": [], "count": 0, "error": "No flight data in response"}
+        
+        # Log first offer structure for debugging
+        if response.get("data"):
+            first_offer = response["data"][0]
+            logger.info(f"[AMADEUS] First offer structure: {json.dumps(first_offer, indent=2, default=str)}")
+            
+            # Validate required fields
+            if not first_offer.get("price", {}).get("total"):
+                logger.warning("[AMADEUS] Missing price information in first offer")
+            if not first_offer.get("itineraries"):
+                logger.warning("[AMADEUS] Missing itineraries in first offer")
+        
         flights = []
-        for offer in response.get("data", []):
+        for i, offer in enumerate(response.get("data", [])):
+            logger.info(f"[AMADEUS] Processing offer {i+1}: ID={offer.get('id')}, Price={offer.get('price', {}).get('total')}")
+            
             flight_info = {
                 "id": offer.get("id"),
                 "price": offer.get("price", {}).get("total"),
@@ -198,10 +225,16 @@ class AmadeusService:
                 "itineraries": []
             }
             
-            for itinerary in offer.get("itineraries", []):
+            for j, itinerary in enumerate(offer.get("itineraries", [])):
+                logger.info(f"[AMADEUS] Processing itinerary {j+1}: Duration={itinerary.get('duration')}, Segments={len(itinerary.get('segments', []))}")
+                
                 segments = []
-                for segment in itinerary.get("segments", []):
-                    segments.append({
+                for k, segment in enumerate(itinerary.get("segments", [])):
+                    # Extract flight number and carrier code correctly
+                    carrier_code = segment.get("carrierCode", "")
+                    flight_number = segment.get("number", "")
+                    
+                    segment_info = {
                         "departure": {
                             "airport": segment.get("departure", {}).get("iataCode"),
                             "time": segment.get("departure", {}).get("at")
@@ -210,9 +243,13 @@ class AmadeusService:
                             "airport": segment.get("arrival", {}).get("iataCode"),
                             "time": segment.get("arrival", {}).get("at")
                         },
-                        "airline": segment.get("carrierCode"),
+                        "airline": carrier_code,
+                        "flight_number": flight_number,
                         "duration": segment.get("duration")
-                    })
+                    }
+                    
+                    logger.info(f"[AMADEUS] Segment {k+1}: {segment_info['departure']['airport']} {segment_info['departure']['time']} -> {segment_info['arrival']['airport']} {segment_info['arrival']['time']} ({carrier_code} {flight_number})")
+                    segments.append(segment_info)
                 
                 flight_info["itineraries"].append({
                     "duration": itinerary.get("duration"),
@@ -220,8 +257,11 @@ class AmadeusService:
                 })
             
             flights.append(flight_info)
+            logger.info(f"[AMADEUS] Formatted flight {i+1}: Price={flight_info['price']}, Itineraries={len(flight_info['itineraries'])}")
         
-        return {"flights": flights, "count": len(flights)}
+        result = {"flights": flights, "count": len(flights)}
+        logger.info(f"[AMADEUS] Final formatted result: {len(flights)} flights")
+        return result
     
     def _format_inspiration_response(self, response: Dict[str, Any]) -> Dict[str, Any]:
         """Format flight inspiration response"""
@@ -296,6 +336,7 @@ class AmadeusService:
         
         return {"dates": dates, "count": len(dates)}
     
-    async def close(self):
+    def close(self):
         """Close HTTP client"""
-        await self._client.aclose()
+        if self._client:
+            self._client.close()

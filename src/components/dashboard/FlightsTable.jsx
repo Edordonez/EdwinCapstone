@@ -24,12 +24,13 @@ export function FlightsTable({ flights }) {
           <TableHeader>
             <TableRow>
               <TableHead>Airline</TableHead>
-              <TableHead>Flight</TableHead>
+              <TableHead>Flight Code</TableHead>
               <TableHead>Departure</TableHead>
               <TableHead>Arrival</TableHead>
               <TableHead>Duration</TableHead>
               <TableHead>Stops</TableHead>
               <TableHead className="text-right">Price</TableHead>
+              <TableHead className="text-center">Book Now</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
@@ -46,7 +47,9 @@ export function FlightsTable({ flights }) {
                     {flight.airline}
                   </div>
                 </TableCell>
-                <TableCell>{flight.flightNumber}</TableCell>
+                <TableCell>
+                  <span className="font-mono text-sm">{flight.flightNumber}</span>
+                </TableCell>
                 <TableCell>{flight.departure}</TableCell>
                 <TableCell>{flight.arrival}</TableCell>
                 <TableCell>{flight.duration}</TableCell>
@@ -68,6 +71,16 @@ export function FlightsTable({ flights }) {
                       </Badge>
                     )}
                   </div>
+                </TableCell>
+                <TableCell className="text-center">
+                  <a
+                    href={flight.bookingLink || `https://www.google.com/search?q=${encodeURIComponent(flight.airline + ' ' + flight.flightNumber + ' booking')}`}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="inline-flex items-center px-3 py-1 text-xs font-medium text-blue-600 bg-blue-50 rounded-md hover:bg-blue-100 transition-colors"
+                  >
+                    Book Now
+                  </a>
                 </TableCell>
               </TableRow>
             ))}

@@ -107,14 +107,17 @@ def _format_single_flight(
     
     segments = itinerary.get("segments", [])
     if not segments:
+        logger.warning(f"[FLIGHT_FORMATTER] No segments in itinerary {itinerary_index}")
         return None
     
     first_segment = segments[0]
     last_segment = segments[-1]
     
-    # Get airline info
+    # Get airline info - check both possible field names
     airline_code = first_segment.get("airline", first_segment.get("carrierCode", ""))
-    flight_number = first_segment.get("number", "")
+    flight_number = first_segment.get("flight_number", first_segment.get("number", ""))
+    
+    logger.info(f"[FLIGHT_FORMATTER] Processing flight: {airline_code} {flight_number}")
     
     # Parse departure and arrival times
     dep_time_str = first_segment.get("departure", {}).get("time", "")
@@ -126,10 +129,18 @@ def _format_single_flight(
     # Format duration
     duration = _format_duration(itinerary.get("duration", ""))
     
-    return {
+    # Create flight number display
+    if airline_code and flight_number:
+        flight_number_display = f"{airline_code} {flight_number}"
+    elif airline_code:
+        flight_number_display = airline_code
+    else:
+        flight_number_display = "Unknown"
+    
+    result = {
         "id": f"{flight_offer.get('id', '')}_{itinerary_index}",
         "airline": _get_airline_name(airline_code),
-        "flightNumber": f"{airline_code} {flight_number}",
+        "flightNumber": flight_number_display,
         "departure": dep_display,
         "arrival": arr_display,
         "duration": duration,
@@ -137,8 +148,13 @@ def _format_single_flight(
         "stops": len(segments) - 1,
         "isOptimal": False,  # Will be set later
         "departureAirport": first_segment.get("departure", {}).get("iataCode", ""),
-        "arrivalAirport": last_segment.get("arrival", {}).get("iataCode", "")
+        "arrivalAirport": last_segment.get("arrival", {}).get("iataCode", ""),
+        "bookingLink": _generate_booking_link(_get_airline_name(airline_code), flight_number_display.replace(' ', ''))
     }
+    
+    logger.info(f"[FLIGHT_FORMATTER] Formatted flight: {result['airline']} {result['flightNumber']} - {dep_display} to {arr_display}")
+    logger.info(f"[FLIGHT_FORMATTER] Flight details: Price=${price}, Stops={result['stops']}, DepartureAirport={result['departureAirport']}, ArrivalAirport={result['arrivalAirport']}")
+    return result
 
 def _format_time_display(time_str: str) -> str:
     """Format ISO time string to display format"""
@@ -146,15 +162,26 @@ def _format_time_display(time_str: str) -> str:
         return "N/A"
     
     try:
-        # Parse ISO format
-        dt = datetime.fromisoformat(time_str.replace("Z", "+00:00"))
+        # Parse ISO format with timezone
+        if time_str.endswith("Z"):
+            dt = datetime.fromisoformat(time_str.replace("Z", "+00:00"))
+        elif "+" in time_str or time_str.count("-") > 2:
+            # Has timezone info
+            dt = datetime.fromisoformat(time_str)
+        else:
+            # No timezone info, assume UTC
+            dt = datetime.fromisoformat(time_str + "+00:00")
+        
         return dt.strftime("%I:%M %p")
-    except:
+    except Exception as e:
+        logger.warning(f"[FLIGHT_FORMATTER] Failed to parse time '{time_str}': {e}")
         # Try alternate formats
         try:
+            # Try without timezone
             dt = datetime.strptime(time_str[:16], "%Y-%m-%dT%H:%M")
             return dt.strftime("%I:%M %p")
-        except:
+        except Exception as e2:
+            logger.warning(f"[FLIGHT_FORMATTER] Failed to parse time with alternate format: {e2}")
             return time_str
 
 def _format_date_display(date_str: str) -> str:
@@ -188,26 +215,25 @@ def _get_airline_name(airline_code: str) -> str:
     """Get airline name from code"""
     
     airline_names = {
-        "TK": "Turkish Airlines",
+        # Major US Airlines
         "UA": "United Airlines",
-        "AA": "American Airlines",
+        "AA": "American Airlines", 
         "DL": "Delta Airlines",
+        "WN": "Southwest Airlines",
+        "B6": "JetBlue Airways",
+        "NK": "Spirit Airlines",
+        "F9": "Frontier Airlines",
+        "AS": "Alaska Airlines",
+        "HA": "Hawaiian Airlines",
+        
+        # European Airlines
         "BA": "British Airways",
         "LH": "Lufthansa",
         "AF": "Air France",
-        "KL": "KLM",
-        "EK": "Emirates",
-        "QR": "Qatar Airways",
-        "SQ": "Singapore Airlines",
-        "AC": "Air Canada",
-        "NH": "All Nippon Airways",
-        "JL": "Japan Airlines",
-        "CX": "Cathay Pacific",
-        "QF": "Qantas",
-        "EY": "Etihad Airways",
+        "KL": "KLM Royal Dutch Airlines",
         "OS": "Austrian Airlines",
         "LX": "SWISS",
-        "SK": "SAS",
+        "SK": "SAS Scandinavian Airlines",
         "AZ": "ITA Airways",
         "IB": "Iberia",
         "TP": "TAP Air Portugal",
@@ -215,15 +241,41 @@ def _get_airline_name(airline_code: str) -> str:
         "LO": "LOT Polish Airlines",
         "OK": "Czech Airlines",
         "A3": "Aegean Airlines",
-        "TG": "Thai Airways",
+        "TK": "Turkish Airlines",
+        "SU": "Aeroflot",
+        "PC": "Pegasus Airlines",
+        
+        # Middle East & Asia
+        "EK": "Emirates",
+        "QR": "Qatar Airways",
+        "EY": "Etihad Airways",
         "SV": "Saudia",
+        "SQ": "Singapore Airlines",
+        "CX": "Cathay Pacific",
+        "NH": "All Nippon Airways",
+        "JL": "Japan Airlines",
+        "TG": "Thai Airways",
+        "MH": "Malaysia Airlines",
+        "GA": "Garuda Indonesia",
+        "CI": "China Airlines",
+        "BR": "EVA Air",
+        "OZ": "Asiana Airlines",
+        "KE": "Korean Air",
+        
+        # Other Major Airlines
+        "AC": "Air Canada",
+        "QF": "Qantas",
         "MS": "EgyptAir",
         "ET": "Ethiopian Airlines",
-        "WN": "Southwest Airlines",
-        "B6": "JetBlue",
-        "NK": "Spirit Airlines",
-        "F9": "Frontier Airlines",
-        "AS": "Alaska Airlines",
+        "SA": "South African Airways",
+        "AR": "Aerolíneas Argentinas",
+        "LA": "LATAM Airlines",
+        "CM": "Copa Airlines",
+        "AV": "Avianca",
+        "JJ": "LATAM Brasil",
+        "AM": "Aeroméxico",
+        "VS": "Virgin Atlantic",
+        "VX": "Virgin America",
     }
     
     return airline_names.get(airline_code, airline_code)
@@ -269,6 +321,64 @@ def _generate_price_trend_data(
         })
     
     return trend_data
+
+def _generate_booking_link(airline_name: str, flight_code: str) -> str:
+    """Generate booking link for a flight based on airline and flight code"""
+    if not airline_name or not flight_code:
+        return "https://www.google.com/search?q=flight+booking"
+    
+    # Map airline names to their booking URLs
+    airline_booking_urls = {
+        "Air France": "https://www.airfrance.com",
+        "Delta Airlines": "https://www.delta.com",
+        "American Airlines": "https://www.aa.com",
+        "United Airlines": "https://www.united.com",
+        "Lufthansa": "https://www.lufthansa.com",
+        "British Airways": "https://www.britishairways.com",
+        "KLM Royal Dutch Airlines": "https://www.klm.com",
+        "Iberia": "https://www.iberia.com",
+        "ITA Airways": "https://www.ita-airways.com",
+        "SWISS": "https://www.swiss.com",
+        "Austrian Airlines": "https://www.austrian.com",
+        "SAS Scandinavian Airlines": "https://www.sas.se",
+        "TAP Air Portugal": "https://www.flytap.com",
+        "Virgin Atlantic": "https://www.virgin-atlantic.com",
+        "Emirates": "https://www.emirates.com",
+        "Qatar Airways": "https://www.qatarairways.com",
+        "Turkish Airlines": "https://www.turkishairlines.com",
+        "Aeroflot": "https://www.aeroflot.com",
+        "Air Canada": "https://www.aircanada.com",
+        "JetBlue Airways": "https://www.jetblue.com",
+        "Southwest Airlines": "https://www.southwest.com",
+        "Alaska Airlines": "https://www.alaskaair.com",
+        "Spirit Airlines": "https://www.spirit.com",
+        "Frontier Airlines": "https://www.flyfrontier.com",
+        "Hawaiian Airlines": "https://www.hawaiianairlines.com",
+        "Singapore Airlines": "https://www.singaporeair.com",
+        "Cathay Pacific": "https://www.cathaypacific.com",
+        "All Nippon Airways": "https://www.ana.co.jp",
+        "Japan Airlines": "https://www.jal.co.jp",
+        "Thai Airways": "https://www.thaiairways.com",
+        "Malaysia Airlines": "https://www.malaysiaairlines.com",
+        "Garuda Indonesia": "https://www.garuda-indonesia.com",
+        "China Airlines": "https://www.china-airlines.com",
+        "EVA Air": "https://www.evaair.com",
+        "Asiana Airlines": "https://www.flyasiana.com",
+        "Korean Air": "https://www.koreanair.com",
+        "Qantas": "https://www.qantas.com",
+        "EgyptAir": "https://www.egyptair.com",
+        "Ethiopian Airlines": "https://www.ethiopianairlines.com",
+        "South African Airways": "https://www.flysaa.com",
+        "Aerolíneas Argentinas": "https://www.aerolineas.com.ar",
+        "LATAM Airlines": "https://www.latam.com",
+        "Copa Airlines": "https://www.copaair.com",
+        "Avianca": "https://www.avianca.com",
+        "LATAM Brasil": "https://www.latam.com",
+        "Aeroméxico": "https://www.aeromexico.com",
+        "Virgin America": "https://www.virginamerica.com",
+    }
+    
+    return airline_booking_urls.get(airline_name, f"https://www.google.com/search?q={airline_name}+{flight_code}+booking")
 
 def _mark_best_deals(flights: List[Dict[str, Any]]) -> None:
     """Mark the best deals in a list of flights"""

@@ -129,7 +129,7 @@ def test():
 async def diag_amadeus_location(keyword: str = "Paris"):
     try:
         logger.info(f"[DIAG] Testing Amadeus location search with keyword='{keyword}'")
-        result = await amadeus_service.get_airport_city_search(keyword=keyword)
+        result = amadeus_service.get_airport_city_search(keyword=keyword)
         count = (result or {}).get("count", 0)
         sample = None
         if result and result.get("locations"):
@@ -143,7 +143,7 @@ async def diag_amadeus_location(keyword: str = "Paris"):
 async def diag_amadeus_flight(origin: str = "PAR", destination: str = "TYO", date: str = "2025-12-01"):
     try:
         logger.info(f"[DIAG] Testing Amadeus flight search {origin}->{destination} on {date}")
-        result = await amadeus_service.search_flights(origin=origin, destination=destination, departure_date=date)
+        result = amadeus_service.search_flights(origin=origin, destination=destination, departure_date=date)
         count = (result or {}).get("count", 0)
         sample = None
         if result and result.get("flights"):
@@ -159,7 +159,7 @@ async def diag_amadeus_flight_dates(origin: str = "PAR", destination: str = "TYO
     try:
         date_range = f"{start},{end}"
         logger.info(f"[DIAG] Testing Amadeus flight-dates {origin}->{destination} range {date_range}")
-        result = await amadeus_service.get_cheapest_dates(
+        result = amadeus_service.get_cheapest_dates(
             origin=origin,
             destination=destination,
             departure_date_range=date_range
@@ -177,7 +177,7 @@ async def diag_amadeus_flight_dates(origin: str = "PAR", destination: str = "TYO
 @app.get("/api/diag/amadeus/token")
 async def diag_amadeus_token():
     try:
-        token = await amadeus_service._get_access_token()
+        token = amadeus_service._get_access_token()
         return {"ok": True, "token_present": bool(token), "token_prefix": token[:12] if token else None}
     except Exception as e:
         return {"ok": False, "error": str(e)}
@@ -185,9 +185,42 @@ async def diag_amadeus_token():
 @app.get("/api/diag/amadeus/inspiration")
 async def diag_amadeus_inspiration(origin: str = "PAR", maxPrice: int = 200):
     try:
-        result = await amadeus_service.get_flight_inspiration(origin=origin, max_price=maxPrice)
+        result = amadeus_service.get_flight_inspiration(origin=origin, max_price=maxPrice)
         return {"ok": True, "count": (result or {}).get("count", 0), "sample": (result or {}).get("destinations", [])[:3], "raw": result}
     except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+@app.get("/api/diag/flight-raw")
+async def diag_flight_raw(origin: str = "JFK", destination: str = "CDG", date: str = "2024-12-10"):
+    """Diagnostic endpoint to show raw Amadeus response vs formatted data"""
+    try:
+        logger.info(f"[DIAG] Testing flight search: {origin} -> {destination} on {date}")
+        
+        # Get raw Amadeus response
+        raw_response = amadeus_service._make_request("/v2/shopping/flight-offers", {
+            "originLocationCode": origin,
+            "destinationLocationCode": destination,
+            "departureDate": date,
+            "adults": 1
+        })
+        
+        # Get formatted response
+        formatted_response = amadeus_service._format_flight_response(raw_response)
+        
+        return {
+            "ok": True,
+            "api_base_url": amadeus_service.base_url,
+            "raw_response": raw_response,
+            "formatted_response": formatted_response,
+            "comparison": {
+                "raw_offers": len(raw_response.get("data", [])),
+                "formatted_flights": len(formatted_response.get("flights", [])),
+                "first_raw_offer": raw_response.get("data", [{}])[0] if raw_response.get("data") else None,
+                "first_formatted_flight": formatted_response.get("flights", [{}])[0] if formatted_response.get("flights") else None
+            }
+        }
+    except Exception as e:
+        logger.error(f"[DIAG] Flight raw test failed: {e}")
         return {"ok": False, "error": str(e)}
 
 @app.post("/api/test-context")
@@ -413,9 +446,9 @@ For multi-day itineraries, ALWAYS include this visual component:
 E) Flight search results (with real data)
 # Flights from {{origin}} to {{destination}}
 ## Best Options
-| Airline | Price | Duration | Stops | Departure |
-|---|---|---|---|---|
-| {{airline}} | {{price}} | {{duration}} | {{stops}} | {{time}} |
+| Airline | Flight Code | Price | Duration | Stops | Departure | Book Now |
+|---------|-------------|-------|----------|-------|-----------|----------|
+| {{airline}} | {{flight_code}} | {{price}} | {{duration}} | {{stops}} | {{time}} | [Book Now]({{booking_link}}) |
 
 F) Hotel search results (with real data) - USE VISUAL COMPONENTS
 # Hotels in {{city}}
@@ -490,15 +523,40 @@ Output:
                 data_section += f"MANDATORY FORMAT: Start with '# Best Round-Trip Deal\\n\\n**Outbound:** {best['outbound']['airline']} {best['outbound']['flightNumber']} - ${best['outbound']['price']} ({best['outbound']['departure']} - {best['outbound']['arrival']})\\n**Return:** {best['return']['airline']} {best['return']['flightNumber']} - ${best['return']['price']} ({best['return']['departure']} - {best['return']['arrival']})\\n**Total:** ${best['totalPrice']} ({best['savings']})\\n\\n## Other Options\\nThen show other flight options below.'\n"
                 data_section += f"DO NOT calculate your own totals - use the EXACT total of ${best['totalPrice']}!\n\n"
             
-            # Show individual flight options
+            # Show individual flight options in table format
             if 'outboundFlights' in amadeus_data:
-                data_section += f"OUTBOUND FLIGHTS ({len(amadeus_data['outboundFlights'])} options):\n"
-                for i, flight in enumerate(amadeus_data['outboundFlights'][:3], 1):
-                    data_section += f"{i}. {flight['airline']} {flight['flightNumber']} - ${flight['price']} ({flight['departure']} - {flight['arrival']})\n"
+                data_section += f"# Flights from {origin} to {destination}\n"
+                data_section += f"## Best Options\n"
+                data_section += f"| Book Now | Airline | Flight Code | Price | Duration | Stops | Departure |\n"
                 
-                data_section += f"\nRETURN FLIGHTS ({len(amadeus_data['returnFlights'])} options):\n"
-                for i, flight in enumerate(amadeus_data['returnFlights'][:3], 1):
-                    data_section += f"{i}. {flight['airline']} {flight['flightNumber']} - ${flight['price']} ({flight['departure']} - {flight['arrival']})\n"
+                for flight in amadeus_data['outboundFlights'][:5]:  # Show up to 5 flights
+                    # Extract flight code from flightNumber (e.g., "AF 123" -> "AF123")
+                    flight_code = flight.get('flightNumber', '').replace(' ', '')
+                    
+                    # Create booking link based on airline
+                    booking_link = _generate_booking_link(flight.get('airline', ''), flight_code)
+                    
+                    # Format stops
+                    stops = flight.get('stops', 0)
+                    stops_display = "Non-stop" if stops == 0 else f"{stops} stop{'s' if stops > 1 else ''}"
+                    
+                    # Format departure time with date
+                    departure_time = flight.get('departure', '')
+                    arrival_time = flight.get('arrival', '')
+                    
+                    data_section += f"| [Book Now]({booking_link}) | {flight['airline']} | {flight_code} | ${flight['price']} | {flight['duration']} | {stops_display} | {departure_time} |\n"
+                
+                if 'returnFlights' in amadeus_data and amadeus_data['returnFlights']:
+                    data_section += f"\n## Return Flights\n"
+                    data_section += f"| Book Now | Airline | Flight Code | Price | Duration | Stops | Departure |\n"
+                    
+                    for flight in amadeus_data['returnFlights'][:5]:
+                        flight_code = flight.get('flightNumber', '').replace(' ', '')
+                        booking_link = _generate_booking_link(flight.get('airline', ''), flight_code)
+                        stops = flight.get('stops', 0)
+                        stops_display = "Non-stop" if stops == 0 else f"{stops} stop{'s' if stops > 1 else ''}"
+                        
+                        data_section += f"| [Book Now]({booking_link}) | {flight['airline']} | {flight_code} | ${flight['price']} | {flight['duration']} | {stops_display} | {flight['departure']} |\n"
             else:
                 # Fallback for old format
                 data_section += f"FLIGHTS ({amadeus_data.get('count', 0)} found):\n"
@@ -538,6 +596,49 @@ Output:
         system_prompt += "Please try rephrasing your request with specific dates and locations, or try a different search.\n"
     
     return system_prompt
+
+def _generate_booking_link(airline_name, flight_code):
+    """Generate booking link for a flight based on airline and flight code"""
+    if not airline_name or not flight_code:
+        return "https://www.google.com/search?q=flight+booking"
+    
+    # Map airline names to their booking URLs
+    airline_booking_urls = {
+        "Air France": "https://www.airfrance.com",
+        "Delta Airlines": "https://www.delta.com",
+        "American Airlines": "https://www.aa.com",
+        "United Airlines": "https://www.united.com",
+        "Lufthansa": "https://www.lufthansa.com",
+        "British Airways": "https://www.britishairways.com",
+        "KLM": "https://www.klm.com",
+        "Iberia": "https://www.iberia.com",
+        "Alitalia": "https://www.alitalia.com",
+        "Swiss": "https://www.swiss.com",
+        "Austrian": "https://www.austrian.com",
+        "SAS": "https://www.sas.se",
+        "TAP Air Portugal": "https://www.flytap.com",
+        "Virgin Atlantic": "https://www.virgin-atlantic.com",
+        "Emirates": "https://www.emirates.com",
+        "Qatar Airways": "https://www.qatarairways.com",
+        "Turkish Airlines": "https://www.turkishairlines.com",
+        "Aeroflot": "https://www.aeroflot.com",
+        "Air Canada": "https://www.aircanada.com",
+        "WestJet": "https://www.westjet.com",
+        "JetBlue": "https://www.jetblue.com",
+        "Southwest": "https://www.southwest.com",
+        "Alaska Airlines": "https://www.alaskaair.com",
+        "Hawaiian Airlines": "https://www.hawaiianairlines.com",
+        "Spirit Airlines": "https://www.spirit.com",
+        "Frontier Airlines": "https://www.flyfrontier.com",
+        "Allegiant Air": "https://www.allegiantair.com"
+    }
+    
+    # Get the base URL for the airline
+    base_url = airline_booking_urls.get(airline_name, "https://www.google.com/search?q=flight+booking")
+    
+    # For most airlines, we'll use the base URL and let users search for the specific flight
+    # Some airlines have specific flight search patterns, but for simplicity, we'll use the base URL
+    return base_url
 
 def format_place_names(text):
     """Format place names in text with bold and underlined formatting"""
@@ -613,7 +714,13 @@ async def chat(req: ChatRequest):
         # Detect intent using the intent detector
         if intent_detector:
             try:
-                intent = await intent_detector.analyze_message(user_message, req.messages)
+                # Create context object with current date and location
+                context = {
+                    'now_iso': now_iso,
+                    'user_tz': user_tz,
+                    'user_location': user_location
+                }
+                intent = await intent_detector.analyze_message(user_message, req.messages, context)
                 logger.info(f"Intent detection result: type={intent['type']}, confidence={intent['confidence']}, has_required_params={intent['has_required_params']}")
                 logger.info(f"Extracted parameters: {intent['params']}")
             except Exception as e:
@@ -660,8 +767,18 @@ async def chat(req: ChatRequest):
             # Call real Amadeus API if we have the required parameters
             if origin and destination and departure_date and amadeus_service:
                 try:
-                    logger.info(f"Calling Amadeus API: {origin} -> {destination} on {departure_date}")
-                    amadeus_data = await amadeus_service.search_flights(
+                    # Validate dates before API call
+                    from datetime import datetime
+                    try:
+                        parsed_date = datetime.strptime(departure_date, "%Y-%m-%d")
+                        if parsed_date < datetime.now():
+                            logger.warning(f"[MAIN] ⚠️ Departure date {departure_date} is in the past! This will cause API error.")
+                    except ValueError:
+                        logger.warning(f"[MAIN] ⚠️ Invalid departure date format: {departure_date}")
+                    
+                    logger.info(f"[MAIN] Calling Amadeus API: {origin} -> {destination} on {departure_date}")
+                    logger.info(f"[MAIN] API Base URL: {amadeus_service.base_url}")
+                    amadeus_data = amadeus_service.search_flights(
                         origin=origin,
                         destination=destination,
                         departure_date=departure_date,
@@ -669,12 +786,23 @@ async def chat(req: ChatRequest):
                         adults=adults,
                         max_price=max_price
                     )
-                    logger.info(f"Amadeus API returned: {amadeus_data.get('count', 0) if amadeus_data else 0} flights")
+                    logger.info(f"[MAIN] Amadeus API returned: {amadeus_data.get('count', 0) if amadeus_data else 0} flights")
+                    
+                    # Log whether we got real data or error
+                    if amadeus_data and not amadeus_data.get('error'):
+                        logger.info(f"[MAIN] ✅ Using REAL Amadeus data - {len(amadeus_data.get('flights', []))} flights")
+                        if amadeus_data.get('flights'):
+                            first_flight = amadeus_data['flights'][0]
+                            logger.info(f"[MAIN] First flight sample: Price={first_flight.get('price')}, Currency={first_flight.get('currency')}")
+                        # Mark that we have real data to prevent mock data generation
+                        amadeus_data['_is_real_data'] = True
+                    else:
+                        logger.warning(f"[MAIN] ⚠️ Amadeus API returned error: {amadeus_data.get('error', 'Unknown error')}")
                 except Exception as e:
-                    logger.error(f"Amadeus API call failed: {e}")
+                    logger.error(f"[MAIN] Amadeus API call failed: {e}")
                     amadeus_data = {"error": f"API call failed: {str(e)}"}
             else:
-                logger.warning("Missing required parameters for Amadeus API call")
+                logger.warning("[MAIN] Missing required parameters for Amadeus API call")
                 amadeus_data = {"error": "Missing origin, destination, or departure date"}
         # If travel intent detected and has required parameters, fetch data
         elif intent["type"] != "general" and intent["has_required_params"] and intent["confidence"] > 0.5:
@@ -702,7 +830,7 @@ async def chat(req: ChatRequest):
                         # Check if we need to convert city names to IATA codes
                         if not _is_iata_code(origin):
                             logger.info(f"Converting origin '{origin}' to IATA code")
-                            location_result = await amadeus_service.get_airport_city_search(keyword=origin)
+                            location_result = amadeus_service.get_airport_city_search(keyword=origin)
                             if location_result and not location_result.get('error') and location_result.get('locations'):
                                 # Use the first result's IATA code from normalized schema
                                 origin = location_result['locations'][0].get('code', origin)
@@ -710,13 +838,13 @@ async def chat(req: ChatRequest):
                         
                         if not _is_iata_code(destination):
                             logger.info(f"Converting destination '{destination}' to IATA code")
-                            location_result = await amadeus_service.get_airport_city_search(keyword=destination)
+                            location_result = amadeus_service.get_airport_city_search(keyword=destination)
                             if location_result and not location_result.get('error') and location_result.get('locations'):
                                 # Use the first result's IATA code from normalized schema
                                 destination = location_result['locations'][0].get('code', destination)
                                 logger.info(f"Converted destination to IATA code: {destination}")
                         
-                        amadeus_data = await amadeus_service.search_flights(
+                        amadeus_data = amadeus_service.search_flights(
                             origin=origin,
                             destination=destination,
                             departure_date=intent["params"]["departure_date"],
@@ -727,7 +855,7 @@ async def chat(req: ChatRequest):
                         logger.info(f"Amadeus flight search returned count={(amadeus_data or {}).get('count')} for {origin}->{destination}")
                     elif intent["type"] == "hotel_search":
                         logger.info(f"Calling hotel search with params: {intent['params']}")
-                        amadeus_data = await amadeus_service.search_hotels(
+                        amadeus_data = amadeus_service.search_hotels(
                             city_code=intent["params"]["destination"],
                             check_in=intent["params"]["check_in"],
                             check_out=intent["params"]["check_out"],
@@ -739,7 +867,7 @@ async def chat(req: ChatRequest):
                     elif intent["type"] == "activity_search":
                         logger.info(f"Calling activity search with params: {intent['params']}")
                         if "latitude" in intent["params"] and "longitude" in intent["params"]:
-                            amadeus_data = await amadeus_service.search_activities(
+                            amadeus_data = amadeus_service.search_activities(
                                 latitude=float(intent["params"]["latitude"]),
                                 longitude=float(intent["params"]["longitude"]),
                                 radius=intent["params"].get("radius", 20)
@@ -750,7 +878,7 @@ async def chat(req: ChatRequest):
                             amadeus_data = {"error": "Activity search requires location coordinates"}
                     elif intent["type"] == "flight_inspiration":
                         logger.info(f"Calling flight inspiration with params: {intent['params']}")
-                        amadeus_data = await amadeus_service.get_flight_inspiration(
+                        amadeus_data = amadeus_service.get_flight_inspiration(
                             origin=intent["params"]["origin"],
                             max_price=intent["params"].get("max_price"),
                             departure_date=intent["params"].get("departure_date")
@@ -758,7 +886,7 @@ async def chat(req: ChatRequest):
                         logger.info(f"Amadeus flight inspiration returned count={(amadeus_data or {}).get('count')}")
                     elif intent["type"] == "location_search":
                         logger.info(f"Calling location search with params: {intent['params']}")
-                        amadeus_data = await amadeus_service.get_airport_city_search(
+                        amadeus_data = amadeus_service.get_airport_city_search(
                             keyword=intent["params"]["keyword"]
                         )
                         logger.info(f"Amadeus location search returned count={(amadeus_data or {}).get('count')}")
@@ -770,12 +898,38 @@ async def chat(req: ChatRequest):
                         
                 except Exception as e:
                     logger.error(f"Amadeus API call failed: {e}")
-                    amadeus_data = {"error": f"API call failed: {str(e)}"}
+                    # Generate mock data as fallback for flight searches
+                    if intent["type"] == "flight_search":
+                        logger.warning(f"[MAIN] 🚨 GENERATING MOCK DATA due to API failure: {e}")
+                        route_info = {
+                            'departure': intent["params"].get("origin", "Washington"),
+                            'destination': intent["params"].get("destination", "Barcelona"),
+                            'departure_date': intent["params"].get("departure_date"),
+                            'return_date': intent["params"].get("return_date"),
+                            'departure_display': intent["params"].get("departure_display"),
+                            'return_display': intent["params"].get("return_display")
+                        }
+                        amadeus_data = generate_mock_flight_data(route_info, user_message)
+                        logger.warning(f"[MAIN] 🚨 MOCK DATA GENERATED - hasRealData=False")
+                    else:
+                        amadeus_data = {"error": f"API call failed: {str(e)}"}
                     
         # Add fallback for when no data is fetched but intent was detected
         elif intent["type"] != "general" and intent["confidence"] > 0.5:
             logger.warning(f"Intent detected but no API call made: {intent}")
-            amadeus_data = {"error": "Unable to fetch real-time data. Please try rephrasing your request with specific dates and locations."}
+            # Only generate mock data if we truly have no data and it's a flight search
+            if intent["type"] == "flight_search" and not amadeus_data and not amadeus_data.get('_is_real_data'):
+                logger.warning(f"[MAIN] 🚨 GENERATING MOCK DATA for missing parameters")
+                route_info = {
+                    'departure': intent["params"].get("origin", "Washington"),
+                    'destination': intent["params"].get("destination", "Barcelona"),
+                    'departure_date': intent["params"].get("departure_date"),
+                    'return_date': intent["params"].get("return_date")
+                }
+                amadeus_data = generate_mock_flight_data(route_info, user_message)
+                logger.warning(f"[MAIN] 🚨 MOCK DATA GENERATED - hasRealData=False")
+            else:
+                amadeus_data = {"error": "Unable to fetch real-time data. Please try rephrasing your request with specific dates and locations."}
         
         # Generate response using OpenAI
         try:

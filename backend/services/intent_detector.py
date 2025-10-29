@@ -24,28 +24,45 @@ class IntentDetector:
             raise ValueError("OPENAI_API_KEY must be set")
         self.client = OpenAI(api_key=api_key)
     
-    async def analyze_message(self, message: str, conversation_history: List[Dict[str, str]] = None) -> Dict[str, Any]:
+    async def analyze_message(self, message: str, conversation_history: List[Dict[str, str]] = None, context: Dict[str, Any] = None) -> Dict[str, Any]:
         """
         Analyze user message to detect travel intent and extract parameters
+        
+        Args:
+            message: User message to analyze
+            conversation_history: Previous conversation messages
+            context: Context object with current date, location, etc.
         
         Returns:
             Dict with keys: type, confidence, params, has_required_params
         """
         try:
-            # Create context from conversation history
-            context = ""
+            # Create context from conversation history and system context
+            context_str = ""
             if conversation_history:
                 recent_messages = conversation_history[-3:]  # Last 3 messages for context
-                context = "Recent conversation:\n"
+                context_str = "Recent conversation:\n"
                 for msg in recent_messages:
                     role = msg.get("role", "user")
                     content = msg.get("content", "")
-                    context += f"{role}: {content}\n"
+                    context_str += f"{role}: {content}\n"
+            
+            # Add system context (current date, location, etc.)
+            if context:
+                current_time = context.get('now_iso', '')
+                user_location = context.get('user_location', {})
+                user_tz = context.get('user_tz', '')
+                
+                context_str += f"\nSystem context:\n"
+                context_str += f"- Current time: {current_time}\n"
+                context_str += f"- User timezone: {user_tz}\n"
+                if user_location:
+                    context_str += f"- User location: {user_location.get('city', 'Unknown')}, {user_location.get('country', 'Unknown')}\n"
             
             # Create focused prompt for intent detection
             prompt = f"""Analyze this travel-related message and extract intent and parameters.
 
-{context}
+{context_str}
 Current message: {message}
 
 Detect the travel intent and extract relevant parameters. Return ONLY a JSON object with this structure:
@@ -96,6 +113,13 @@ Extract dates in YYYY-MM-DD format. Convert relative dates like "tomorrow", "nex
 For cities/airports, use full city names (e.g., "Washington DC", "Barcelona", "New York").
 For prices, extract numbers only (remove currency symbols).
 For coordinates, only include if explicitly mentioned.
+
+CRITICAL DATE PARSING RULES:
+- Use the current time from system context to determine the correct year
+- If user says "December 10-17" and current time shows 2025, use 2025-12-10 to 2025-12-17
+- If user says "December 10-17" and current time shows 2024, use 2024-12-10 to 2024-12-17
+- If no year is specified, use the current year from system context
+- If the resulting date would be in the past, use next year instead
 
 IMPORTANT: If no specific date is mentioned, use reasonable defaults:
 - For flight searches: use a date 30 days from now
@@ -219,6 +243,34 @@ Return only the JSON object, no other text."""
                 default_date = (datetime.now() + timedelta(days=30)).strftime("%Y-%m-%d")
                 params["departure_date"] = default_date
                 logger.debug(f"Added default departure_date: {default_date}")
+            else:
+                # Validate that the parsed date is not in the past
+                try:
+                    parsed_date = datetime.strptime(params["departure_date"], "%Y-%m-%d")
+                    if parsed_date < datetime.now():
+                        # If date is in the past, move to next year
+                        next_year_date = parsed_date.replace(year=parsed_date.year + 1)
+                        params["departure_date"] = next_year_date.strftime("%Y-%m-%d")
+                        logger.debug(f"Date was in the past, moved to next year: {params['departure_date']}")
+                except ValueError:
+                    logger.warning(f"Invalid date format: {params['departure_date']}")
+                    # Fallback to default
+                    default_date = (datetime.now() + timedelta(days=30)).strftime("%Y-%m-%d")
+                    params["departure_date"] = default_date
+            
+            # Also validate return date if present
+            if "return_date" in params:
+                try:
+                    parsed_return_date = datetime.strptime(params["return_date"], "%Y-%m-%d")
+                    if parsed_return_date < datetime.now():
+                        # If return date is in the past, move to next year
+                        next_year_return_date = parsed_return_date.replace(year=parsed_return_date.year + 1)
+                        params["return_date"] = next_year_return_date.strftime("%Y-%m-%d")
+                        logger.debug(f"Return date was in the past, moved to next year: {params['return_date']}")
+                except ValueError:
+                    logger.warning(f"Invalid return date format: {params['return_date']}")
+                    # Remove invalid return date
+                    del params["return_date"]
         
         # Add default dates if missing for hotel searches
         elif intent_data["type"] == "hotel_search":
@@ -267,7 +319,7 @@ Return only the JSON object, no other text."""
                 next_month = today.replace(month=today.month + 1)
             return next_month.strftime("%Y-%m-%d")
         
-        # Handle month names, optionally with explicit year like "December 2025"
+        # Handle month names with date ranges like "December 10-17"
         month_mapping = {
             "january": "01", "february": "02", "march": "03", "april": "04",
             "may": "05", "june": "06", "july": "07", "august": "08",
@@ -285,7 +337,20 @@ Return only the JSON object, no other text."""
                     year = today.year
                     if int(month_num) < today.month:
                         year = today.year + 1
-                return f"{year}-{month_num}-01"
+                    # Additional check: if we're in late December and user says "December", 
+                    # they likely mean next year
+                    elif today.month == 12 and int(month_num) == 12 and today.day > 15:
+                        year = today.year + 1
+                
+                # Check for date range pattern like "december 10-17"
+                range_match = re.search(rf"{month_name}\s+(\d+)\s*-\s*(\d+)", date_str_lower)
+                if range_match:
+                    # Use the first date in the range
+                    day = int(range_match.group(1))
+                    return f"{year}-{month_num}-{day:02d}"
+                else:
+                    # Single date or just month name - use 1st of month
+                    return f"{year}-{month_num}-01"
         
         # Handle "this month" - return a date in the current month
         if "this month" in date_str_lower:

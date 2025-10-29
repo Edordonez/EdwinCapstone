@@ -1,11 +1,12 @@
 fastapi
 uvicorn[standard]
 python-dotenv
-openai==1.*
+openai==1.12.0
 pydantic
 pytz
 amadeus
-httpx
+httpx==0.24.1
+requests
 cachetools
 
 
