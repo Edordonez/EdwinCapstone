@@ -91,10 +91,12 @@ export function FlightDashboard({ searchData = null }) {
   console.log('FlightDashboard received searchData:', searchData);
   console.log('FlightDashboard route from searchData:', searchData?.route);
   console.log('FlightDashboard hasRealData:', searchData?.hasRealData);
+  console.log('FlightDashboard error:', searchData?.error);
   console.log('FlightDashboard flights count:', searchData?.flights?.length);
   
   // Use real data if provided, otherwise use mock data
   const hasRealData = searchData?.hasRealData || false;
+  const errorMessage = searchData?.error || null;
   const displayPriceData = searchData?.priceData?.length > 0 ? searchData.priceData : generateMockPriceData();
   const displayFlightsData = searchData?.flights?.length > 0 ? searchData.flights : flightsData;
   const routeInfo = searchData?.route || {
@@ -107,10 +109,39 @@ export function FlightDashboard({ searchData = null }) {
   
   console.log('FlightDashboard using data:', {
     hasRealData,
+    errorMessage,
     priceDataLength: displayPriceData.length,
     flightsDataLength: displayFlightsData.length,
     routeInfo
   });
+
+  // Format error message to be more user-friendly
+  const getErrorMessage = (error) => {
+    if (!error) return null;
+    
+    // Parse error message to provide specific guidance
+    if (error.includes('MISSING INFORMATION')) {
+      if (error.includes('origin') || error.includes('destination')) {
+        return "Please provide both origin and destination cities (e.g., 'flights from New York to Paris').";
+      } else if (error.includes('date')) {
+        return "Please provide a departure date (e.g., 'November 3rd' or '11/03/2024').";
+      }
+      return error.replace('MISSING INFORMATION: ', '');
+    } else if (error.includes('INVALID DATE FORMAT')) {
+      return "Please provide dates in a valid format (e.g., 'November 3rd, 2024', '11/03/2024', or 'Nov 3').";
+    } else if (error.includes('INVALID INPUT')) {
+      return error.replace('INVALID INPUT: ', '');
+    } else if (error.includes('API ERROR') || error.includes('API call failed')) {
+      return "Unable to fetch flight data. Please check your connection and try again.";
+    } else if (error.includes('NO FLIGHTS FOUND') || error.includes('No flights available')) {
+      return "No flights available for the specified route and dates. Please try different dates or destinations.";
+    }
+    
+    // Return the error message as-is if it doesn't match any pattern
+    return error;
+  };
+
+  const formattedErrorMessage = getErrorMessage(errorMessage);
 
   return (
     <ScrollArea className="h-full">
@@ -119,9 +150,22 @@ export function FlightDashboard({ searchData = null }) {
         <div className="space-y-2">
           <h2 className="text-2xl font-semibold tracking-tight">Flight Search Results</h2>
           <p className="text-muted-foreground">
-            {routeInfo.departure} ({routeInfo.departureCode}) → {routeInfo.destination} ({routeInfo.destinationCode}) • {routeInfo.date}
+            {routeInfo.departure} ({routeInfo.departureCode}) → {routeInfo.destination} ({routeInfo.destinationCode}) {routeInfo.date ? `• ${routeInfo.date}` : ''}
           </p>
         </div>
+
+        {/* Error Message - Show prominently if hasRealData is false */}
+        {!hasRealData && formattedErrorMessage && (
+          <div className="bg-red-50 border border-red-200 rounded-lg p-4 space-y-2">
+            <div className="flex items-center gap-2">
+              <svg className="w-5 h-5 text-red-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+              </svg>
+              <h3 className="text-lg font-semibold text-red-800">Unable to Find Flights</h3>
+            </div>
+            <p className="text-red-700">{formattedErrorMessage}</p>
+          </div>
+        )}
 
         {/* Flight Map Animation */}
         <FlightMap

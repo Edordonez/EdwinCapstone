@@ -5,7 +5,7 @@ import os
 import httpx
 import requests
 import logging
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional, Any, Tuple
 from datetime import datetime, timedelta
 import json
 
@@ -152,12 +152,20 @@ class AmadeusService:
             logger.error(f"Hotel search failed: {e}")
             return {"error": str(e), "hotels": []}
     
-    def search_activities(self, latitude: float, longitude: float, radius: int = 20) -> Dict[str, Any]:
-        """Search for activities near coordinates"""
+    def search_activities(self, latitude: float, longitude: float, radius: int = 1) -> Dict[str, Any]:
+        """
+        Search for activities near coordinates
+        API: /v1/shopping/activities
+        
+        Args:
+            latitude: Latitude (decimal coordinates)
+            longitude: Longitude (decimal coordinates)
+            radius: Search radius in kilometers (0-20, default 1)
+        """
         params = {
             "latitude": latitude,
             "longitude": longitude,
-            "radius": radius
+            "radius": min(max(radius, 0), 20)  # Clamp between 0 and 20
         }
         
         try:
@@ -166,6 +174,46 @@ class AmadeusService:
         except Exception as e:
             logger.error(f"Activity search failed: {e}")
             return {"error": str(e), "activities": []}
+    
+    def search_activities_by_square(self, north: float, south: float, east: float, west: float) -> Dict[str, Any]:
+        """
+        Search for activities within a bounding box
+        API: /v1/shopping/activities/by-square
+        
+        Args:
+            north: Latitude north of bounding box (decimal coordinates)
+            south: Latitude south of bounding box (decimal coordinates)
+            east: Longitude east of bounding box (decimal coordinates)
+            west: Longitude west of bounding box (decimal coordinates)
+        """
+        params = {
+            "north": north,
+            "south": south,
+            "east": east,
+            "west": west
+        }
+        
+        try:
+            response = self._make_request("/v1/shopping/activities/by-square", params)
+            return self._format_activity_response(response)
+        except Exception as e:
+            logger.error(f"Activity search by square failed: {e}")
+            return {"error": str(e), "activities": []}
+    
+    def get_activity_by_id(self, activity_id: str) -> Dict[str, Any]:
+        """
+        Get detailed information about a specific activity
+        API: /v1/shopping/activities/{activityId}
+        
+        Args:
+            activity_id: Unique activity identifier
+        """
+        try:
+            response = self._make_request(f"/v1/shopping/activities/{activity_id}", {})
+            return self._format_single_activity_response(response)
+        except Exception as e:
+            logger.error(f"Get activity by ID failed: {e}")
+            return {"error": str(e), "activity": None}
     
     def get_airport_city_search(self, keyword: str) -> Dict[str, Any]:
         """Search for airports and cities"""
@@ -177,6 +225,75 @@ class AmadeusService:
         except Exception as e:
             logger.error(f"Location search failed: {e}")
             return {"error": str(e), "locations": []}
+    
+    def get_city_coordinates(self, city_name: str) -> Optional[Tuple[float, float]]:
+        """
+        Get coordinates (latitude, longitude) for a city name
+        Uses the location search API to find city coordinates
+        
+        Args:
+            city_name: Name of the city
+            
+        Returns:
+            Tuple of (latitude, longitude) or None if not found
+        """
+        try:
+            # Search for the city using location API
+            location_data = self.get_airport_city_search(city_name)
+            
+            if location_data.get("error"):
+                return None
+            
+            locations = location_data.get("locations", [])
+            if not locations:
+                return None
+            
+            # Find the first city result (not airport)
+            for location in locations:
+                if location.get("type") == "CITY":
+                    # Check if coordinates are available in the location data
+                    geo_code = location.get("geoCode")
+                    if geo_code and isinstance(geo_code, dict):
+                        lat = geo_code.get("latitude")
+                        lon = geo_code.get("longitude")
+                        if lat and lon:
+                            try:
+                                lat_float = float(lat) if isinstance(lat, str) else lat
+                                lon_float = float(lon) if isinstance(lon, str) else lon
+                                logger.info(f"Found coordinates for {city_name} from Amadeus API: {lat_float}, {lon_float}")
+                                return (lat_float, lon_float)
+                            except (ValueError, TypeError) as e:
+                                logger.warning(f"Invalid coordinates format for {city_name}: {e}")
+                    
+                    # Fallback to external geocoding service if Amadeus doesn't provide coordinates
+                    try:
+                        # Use a free geocoding service as fallback
+                        import requests
+                        geo_response = requests.get(
+                            f"https://nominatim.openstreetmap.org/search",
+                            params={
+                                "q": city_name,
+                                "format": "json",
+                                "limit": 1
+                            },
+                            timeout=5,
+                            headers={"User-Agent": "SmartTravelAssistant/1.0"}
+                        )
+                        if geo_response.ok:
+                            geo_data = geo_response.json()
+                            if geo_data:
+                                lat = float(geo_data[0]["lat"])
+                                lon = float(geo_data[0]["lon"])
+                                logger.info(f"Found coordinates for {city_name} from geocoding service: {lat}, {lon}")
+                                return (lat, lon)
+                    except Exception as geo_error:
+                        logger.warning(f"Geocoding fallback failed for {city_name}: {geo_error}")
+            
+            return None
+            
+        except Exception as e:
+            logger.error(f"Failed to get coordinates for {city_name}: {e}")
+            return None
     
     def get_cheapest_dates(self, origin: str, destination: str, 
                                departure_date_range: str) -> Dict[str, Any]:
@@ -193,6 +310,113 @@ class AmadeusService:
         except Exception as e:
             logger.error(f"Cheapest dates search failed: {e}")
             return {"error": str(e), "dates": []}
+
+    def get_flight_price_analysis(self, origin: str, destination: str, 
+                                       departure_date: str, return_date: str = None) -> Dict[str, Any]:
+        """
+        Get flight price analysis to help users understand price trends
+        API: /v2/analytics/itinerary-price-metrics
+        """
+        params = {
+            "originIataCode": origin,
+            "destinationIataCode": destination,
+            "departureDate": departure_date
+        }
+        
+        if return_date:
+            params["returnDate"] = return_date
+        
+        try:
+            response = self._make_request("/v2/analytics/itinerary-price-metrics", params)
+            return self._format_price_analysis_response(response)
+        except Exception as e:
+            logger.error(f"Flight price analysis failed: {e}")
+            return {"error": str(e), "analysis": None}
+
+    def get_flight_choice_prediction(self, origin: str, destination: str,
+                                         departure_date: str, return_date: str = None,
+                                         cabin_class: str = "ECONOMY") -> Dict[str, Any]:
+        """
+        Get flight choice prediction based on user preferences
+        API: /v2/shopping/flight-offers/prediction
+        This can help personalize recommendations based on user preferences from onboarding
+        """
+        params = {
+            "originLocationCode": origin,
+            "destinationLocationCode": destination,
+            "departureDate": departure_date,
+            "cabinClass": cabin_class
+        }
+        
+        if return_date:
+            params["returnDate"] = return_date
+        
+        try:
+            response = self._make_request("/v2/shopping/flight-offers/prediction", params)
+            return self._format_choice_prediction_response(response)
+        except Exception as e:
+            logger.error(f"Flight choice prediction failed: {e}")
+            return {"error": str(e), "predictions": []}
+
+    def get_flight_delay_prediction(self, origin: str, destination: str,
+                                        departure_date: str, departure_time: str,
+                                        carrier_code: str, flight_number: str) -> Dict[str, Any]:
+        """
+        Get flight delay prediction for better travel planning
+        API: /v1/travel/predictions/flight-delay
+        """
+        params = {
+            "originLocationCode": origin,
+            "destinationLocationCode": destination,
+            "departureDate": departure_date,
+            "departureTime": departure_time,
+            "carrierCode": carrier_code,
+            "flightNumber": flight_number
+        }
+        
+        try:
+            response = self._make_request("/v1/travel/predictions/flight-delay", params)
+            return self._format_delay_prediction_response(response)
+        except Exception as e:
+            logger.error(f"Flight delay prediction failed: {e}")
+            return {"error": str(e), "prediction": None}
+
+    def get_seatmap_display(self, flight_offer_id: str) -> Dict[str, Any]:
+        """
+        Get seat map for flight selection
+        API: /v1/shopping/seatmaps
+        """
+        params = {"flight-orderId": flight_offer_id}
+        
+        try:
+            response = self._make_request("/v1/shopping/seatmaps", params)
+            return self._format_seatmap_response(response)
+        except Exception as e:
+            logger.error(f"Seatmap display failed: {e}")
+            return {"error": str(e), "seatmap": None}
+
+    def get_branded_fares(self, origin: str, destination: str, 
+                              departure_date: str, return_date: str = None) -> Dict[str, Any]:
+        """
+        Get branded fares with different service options
+        API: /v2/shopping/flight-offers (with view=DELTA)
+        """
+        params = {
+            "originLocationCode": origin,
+            "destinationLocationCode": destination,
+            "departureDate": departure_date,
+            "view": "DELTA"  # Returns branded fares
+        }
+        
+        if return_date:
+            params["returnDate"] = return_date
+        
+        try:
+            response = self._make_request("/v2/shopping/flight-offers", params)
+            return self._format_branded_fares_response(response)
+        except Exception as e:
+            logger.error(f"Branded fares search failed: {e}")
+            return {"error": str(e), "fares": []}
     
     def _format_flight_response(self, response: Dict[str, Any]) -> Dict[str, Any]:
         """Format flight search response"""
@@ -295,32 +519,146 @@ class AmadeusService:
         return {"hotels": hotels, "count": len(hotels)}
     
     def _format_activity_response(self, response: Dict[str, Any]) -> Dict[str, Any]:
-        """Format activity search response"""
+        """
+        Format activity search response according to Swagger spec
+        Handles both list responses and single activity responses
+        """
         activities = []
-        for activity in response.get("data", []):
-            activities.append({
-                "id": activity.get("id"),
-                "name": activity.get("name"),
-                "description": activity.get("shortDescription"),
-                "price": activity.get("price", {}).get("amount"),
-                "currency": activity.get("price", {}).get("currencyCode"),
-                "rating": activity.get("rating"),
-                "pictures": [pic.get("url") for pic in activity.get("pictures", [])]
-            })
+        data = response.get("data", [])
         
-        return {"activities": activities, "count": len(activities)}
+        # Handle both array and single object responses
+        if isinstance(data, list):
+            activity_list = data
+        else:
+            activity_list = [data] if data else []
+        
+        for activity in activity_list:
+            # Extract price information
+            price_info = activity.get("price", {})
+            
+            # Extract geoCode information
+            geo_code = activity.get("geoCode", {})
+            
+            # Handle pictures - according to Swagger spec, it's an array of strings (URLs)
+            pictures = activity.get("pictures", [])
+            if pictures and isinstance(pictures[0], dict):
+                # If it's an array of objects, extract URLs
+                pictures = [pic.get("url") or pic for pic in pictures]
+            
+            activity_data = {
+                "id": activity.get("id"),
+                "type": activity.get("type", "activity"),
+                "name": activity.get("name"),
+                "shortDescription": activity.get("shortDescription"),
+                "description": activity.get("description"),  # Full description
+                "price": {
+                    "amount": price_info.get("amount"),
+                    "currencyCode": price_info.get("currencyCode")
+                },
+                "rating": activity.get("rating"),
+                "pictures": pictures if isinstance(pictures, list) else [],
+                "geoCode": {
+                    "latitude": geo_code.get("latitude"),
+                    "longitude": geo_code.get("longitude")
+                } if geo_code else None,
+                "minimumDuration": activity.get("minimumDuration"),
+                "bookingLink": activity.get("bookingLink"),
+                "self": activity.get("self", {})  # Link to get more details
+            }
+            
+            activities.append(activity_data)
+        
+        # Include meta information if available
+        result = {
+            "activities": activities,
+            "count": len(activities)
+        }
+        
+        if "meta" in response:
+            result["meta"] = response["meta"]
+        
+        if "warnings" in response:
+            result["warnings"] = response["warnings"]
+        
+        return result
+    
+    def _format_single_activity_response(self, response: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Format single activity detail response
+        """
+        activity = response.get("data", {})
+        
+        if not activity:
+            return {"error": "No activity data found", "activity": None}
+        
+        # Extract price information
+        price_info = activity.get("price", {})
+        
+        # Extract geoCode information
+        geo_code = activity.get("geoCode", {})
+        
+        # Handle pictures - according to Swagger spec, it's an array of strings (URLs)
+        pictures = activity.get("pictures", [])
+        if pictures and isinstance(pictures[0], dict):
+            # If it's an array of objects, extract URLs
+            pictures = [pic.get("url") or pic for pic in pictures]
+        
+        formatted_activity = {
+            "id": activity.get("id"),
+            "type": activity.get("type", "activity"),
+            "name": activity.get("name"),
+            "shortDescription": activity.get("shortDescription"),
+            "description": activity.get("description"),  # Full description
+            "price": {
+                "amount": price_info.get("amount"),
+                "currencyCode": price_info.get("currencyCode")
+            },
+            "rating": activity.get("rating"),
+            "pictures": pictures if isinstance(pictures, list) else [],
+            "geoCode": {
+                "latitude": geo_code.get("latitude"),
+                "longitude": geo_code.get("longitude")
+            } if geo_code else None,
+            "minimumDuration": activity.get("minimumDuration"),
+            "bookingLink": activity.get("bookingLink"),
+            "self": activity.get("self", {})
+        }
+        
+        result = {
+            "activity": formatted_activity,
+            "count": 1
+        }
+        
+        if "meta" in response:
+            result["meta"] = response["meta"]
+        
+        if "warnings" in response:
+            result["warnings"] = response["warnings"]
+        
+        return result
     
     def _format_location_response(self, response: Dict[str, Any]) -> Dict[str, Any]:
         """Format location search response"""
         locations = []
         for location in response.get("data", []):
-            locations.append({
+            # Extract geoCode if available (for coordinates)
+            geo_code = location.get("geoCode", {})
+            location_data = {
                 "code": location.get("iataCode"),
                 "name": location.get("name"),
                 "type": location.get("subType"),
                 "city": location.get("address", {}).get("cityName"),
                 "country": location.get("address", {}).get("countryName")
-            })
+            }
+            
+            # Add coordinates if available
+            if geo_code:
+                location_data["geoCode"] = {
+                    "latitude": geo_code.get("latitude"),
+                    "longitude": geo_code.get("longitude")
+                }
+            
+            locations.append(location_data)
         
         return {"locations": locations, "count": len(locations)}
     
@@ -335,6 +673,111 @@ class AmadeusService:
             })
         
         return {"dates": dates, "count": len(dates)}
+
+    def _format_price_analysis_response(self, response: Dict[str, Any]) -> Dict[str, Any]:
+        """Format flight price analysis response"""
+        data = response.get("data", {})
+        return {
+            "analysis": {
+                "priceMetrics": data.get("priceMetrics", {}),
+                "priceAnalysis": {
+                    "minPrice": data.get("priceMetrics", {}).get("lowestPrice", {}),
+                    "maxPrice": data.get("priceMetrics", {}).get("highestPrice", {}),
+                    "averagePrice": data.get("priceMetrics", {}).get("averagePrice", {}),
+                    "medianPrice": data.get("priceMetrics", {}).get("medianPrice", {})
+                },
+                "priceVariability": data.get("priceVariability", {}),
+                "recommendations": self._generate_price_recommendations(data)
+            },
+            "count": 1
+        }
+
+    def _format_choice_prediction_response(self, response: Dict[str, Any]) -> Dict[str, Any]:
+        """Format flight choice prediction response"""
+        predictions = []
+        for item in response.get("data", []):
+            predictions.append({
+                "flightOffer": item.get("flightOffer", {}),
+                "predictionScore": item.get("predictionScore", 0),
+                "recommendation": self._interpret_prediction_score(item.get("predictionScore", 0))
+            })
+        
+        return {"predictions": predictions, "count": len(predictions)}
+
+    def _format_delay_prediction_response(self, response: Dict[str, Any]) -> Dict[str, Any]:
+        """Format flight delay prediction response"""
+        data = response.get("data", {})
+        return {
+            "prediction": {
+                "probability": data.get("probability", 0),
+                "predictedDelay": data.get("predictedDelay", 0),
+                "riskLevel": self._get_delay_risk_level(data.get("probability", 0)),
+                "recommendations": self._generate_delay_recommendations(data)
+            },
+            "count": 1
+        }
+
+    def _format_seatmap_response(self, response: Dict[str, Any]) -> Dict[str, Any]:
+        """Format seatmap response"""
+        seatmaps = []
+        for item in response.get("data", []):
+            seatmaps.append({
+                "flightOfferId": item.get("flightOfferId"),
+                "segments": item.get("segments", []),
+                "seatMap": item.get("seatMap", {})
+            })
+        
+        return {"seatmaps": seatmaps, "count": len(seatmaps)}
+
+    def _format_branded_fares_response(self, response: Dict[str, Any]) -> Dict[str, Any]:
+        """Format branded fares response"""
+        # Similar to flight response but includes fare options
+        return self._format_flight_response(response)
+
+    def _generate_price_recommendations(self, data: Dict[str, Any]) -> List[str]:
+        """Generate price recommendations based on analysis"""
+        recommendations = []
+        price_metrics = data.get("priceMetrics", {})
+        
+        if price_metrics.get("lowestPrice", {}).get("price"):
+            recommendations.append(f"Best price: {price_metrics['lowestPrice']['price']} {price_metrics['lowestPrice'].get('currency', 'USD')}")
+        
+        # Add more recommendation logic based on price trends
+        return recommendations
+
+    def _interpret_prediction_score(self, score: float) -> str:
+        """Interpret prediction score for user recommendations"""
+        if score >= 0.8:
+            return "Highly recommended based on your preferences"
+        elif score >= 0.6:
+            return "Good match for your preferences"
+        elif score >= 0.4:
+            return "Moderate match"
+        else:
+            return "May not fully match your preferences"
+
+    def _get_delay_risk_level(self, probability: float) -> str:
+        """Get delay risk level from probability"""
+        if probability >= 0.7:
+            return "HIGH"
+        elif probability >= 0.4:
+            return "MEDIUM"
+        else:
+            return "LOW"
+
+    def _generate_delay_recommendations(self, data: Dict[str, Any]) -> List[str]:
+        """Generate recommendations based on delay prediction"""
+        recommendations = []
+        probability = data.get("probability", 0)
+        
+        if probability >= 0.7:
+            recommendations.append("⚠️ High delay risk - consider booking flexible tickets or alternative flights")
+        elif probability >= 0.4:
+            recommendations.append("⚠️ Moderate delay risk - allow extra time for connections")
+        else:
+            recommendations.append("✅ Low delay risk - flight should be on time")
+        
+        return recommendations
     
     def close(self):
         """Close HTTP client"""

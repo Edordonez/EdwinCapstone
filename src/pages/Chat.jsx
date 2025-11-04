@@ -1,7 +1,7 @@
 import React, { useMemo, useRef, useState, useEffect } from 'react';
 import MessageBubble from '../components/MessageBubble';
 import ChatInput from '../components/ChatInput';
-import { FlightDashboard } from '../components/dashboard/FlightDashboard';
+import TripPreferencesForm from '../components/TripPreferencesForm';
 
 // Location detection utility
 async function getLocationContext() {
@@ -93,34 +93,58 @@ function cleanContext(context) {
   return cleaned;
 }
 
-async function sendToApi(messages, context, sessionId) {
+async function sendToApi(messages, context, sessionId, preferences = null) {
   // Use production Vercel backend or fallback to localhost for development
-  const base = process.env.REACT_APP_API_BASE;
+  // For local development (localhost), always use localhost backend
+  const isLocalhost = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1';
+  const base = isLocalhost 
+    ? 'http://localhost:8000'  // Force localhost for local development
+    : (process.env.REACT_APP_API_BASE || 'http://localhost:8000');
   console.log('API Base URL:', base);
   console.log('Making request to:', `${base}/api/chat`);
   
   const cleanedContext = cleanContext(context);
   console.log('Cleaned context:', cleanedContext);
+  console.log('User preferences:', preferences);
+  
+  // Include preferences in request if available
+  const requestBody = {
+    messages,
+    context: cleanedContext,
+    session_id: sessionId
+  };
+  
+  if (preferences && preferences.preferences) {
+    requestBody.preferences = preferences.preferences;
+  }
   
   const res = await fetch(`${base}/api/chat`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ messages, context: cleanedContext, session_id: sessionId }),
+    body: JSON.stringify(requestBody),
   });
   if (!res.ok) throw new Error('API error');
   return res.json();
 }
 
-export default function Chat({ onShowDashboard, showDashboard, dashboardData, onHideDashboard }) {
+export default function Chat() {
   const [messages, setMessages] = useState([]);
   const [isTyping, setIsTyping] = useState(false);
   const [error, setError] = useState(null);
   const [context, setContext] = useState(null);
   const [, setIsLoadingContext] = useState(true);
   const [sessionId, setSessionId] = useState(null);
+  const [onboardingComplete, setOnboardingComplete] = useState(false);
+  const [userPreferences, setUserPreferences] = useState(null);
   const scrollRef = useRef(null);
 
   const quickReplies = ['Plan a trip to Paris', 'Budget accommodations', 'Check weather'];
+
+  const handleOnboardingComplete = (preferences) => {
+    setUserPreferences(preferences);
+    setOnboardingComplete(true);
+    // Note: We don't save to localStorage so the form shows every time the user visits
+  };
 
   // Initialize context and welcome message
   useEffect(() => {
@@ -431,83 +455,7 @@ export default function Chat({ onShowDashboard, showDashboard, dashboardData, on
     return { origin, destination };
   };
 
-  // Check if message contains flight/price related keywords
-  const shouldShowDashboard = (message) => {
-    const flightKeywords = [
-      // Core flight terms
-      'flight', 'flights', 'airline', 'airlines', 'airplane', 'aircraft', 'plane',
-      'ticket', 'tickets', 'booking', 'book', 'reserve', 'reservation',
-      
-      // Travel terms
-      'travel', 'trip', 'journey', 'vacation', 'holiday', 'getaway',
-      'destination', 'departure', 'arrival', 'airport', 'terminal',
-      
-      // Price and cost terms
-      'price', 'prices', 'cost', 'costs', 'expensive', 'cheap', 'cheapest', 
-      'budget', 'affordable', 'fare', 'fares', 'rate', 'rates',
-      
-      // Action terms
-      'search', 'find', 'look for', 'show me', 'get me', 'need', 'want',
-      'compare', 'comparison', 'options', 'available', 'schedule',
-      
-      // Location terms
-      'to', 'from', 'between', 'route', 'way', 'path',
-      
-      // Time terms
-      'today', 'tomorrow', 'next week', 'this month', 'soon', 'when',
-      
-      // Common phrases
-      'search flights', 'find flights', 'book flights', 'flight search',
-      'airline tickets', 'plane tickets', 'flight booking', 'travel booking'
-    ];
-    
-    const lowerMessage = message.toLowerCase();
-    const shouldShow = flightKeywords.some(keyword => lowerMessage.includes(keyword));
-    
-    console.log('Dashboard trigger check:', { 
-      message, 
-      shouldShow, 
-      matchedKeywords: flightKeywords.filter(k => lowerMessage.includes(k)) 
-    });
-    
-    return shouldShow;
-  };
 
-  // Function to handle dashboard data processing
-  const handleDashboardData = (data) => {
-    console.log('Processing dashboard data:', data);
-    
-    // Check if we have real flight data
-    if (data.dashboard_data && data.dashboard_data.hasRealData) {
-      // Use real Amadeus data
-      console.log('Using real flight data from API');
-      onShowDashboard(data.dashboard_data);
-    } else if (data.flights && data.flights.length > 0) {
-      // Legacy format - convert to new format
-      console.log('Converting legacy format to new format');
-      const dashboardData = {
-        hasRealData: true,
-        route: data.route || {},
-        outboundFlights: data.flights,
-        returnFlights: [],
-        priceData: data.priceData || []
-      };
-      onShowDashboard(dashboardData);
-    } else {
-      // No real data - show mock dashboard
-      console.log('Using fallback mock data');
-      onShowDashboard({
-        hasRealData: false,
-        route: {
-          departure: 'Washington DC',
-          destination: 'Istanbul',
-          departureCode: 'IAD',
-          destinationCode: 'IST',
-          date: new Date().toLocaleDateString()
-        }
-      });
-    }
-  };
 
   const handleSend = async (text) => {
     const userMsg = { role: 'user', content: text, timestamp: new Date().toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' }) };
@@ -516,18 +464,11 @@ export default function Chat({ onShowDashboard, showDashboard, dashboardData, on
     setIsTyping(true);
         try {
           const payload = [...messages, userMsg];
-          console.log('Sending to API:', { payload, context, sessionId });
-          const data = await sendToApi(payload, context, sessionId);
+          console.log('Sending to API:', { payload, context, sessionId, preferences: userPreferences });
+          const data = await sendToApi(payload, context, sessionId, userPreferences);
           console.log('API Response:', data);
           const reply = data.reply || '';
           setMessages((prev) => [...prev, { role: 'assistant', content: reply, timestamp: new Date().toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' }) }]);
-          
-          // Check if we should show dashboard
-          if (shouldShowDashboard(text) && onShowDashboard) {
-            console.log('Triggering dashboard for text:', text);
-            console.log('API Response data:', data);
-            handleDashboardData(data);
-          }
         } catch (e) {
           console.error('API Error:', e);
           setError('Something went wrong. Please try again.');
@@ -541,90 +482,40 @@ export default function Chat({ onShowDashboard, showDashboard, dashboardData, on
     <MessageBubble key={idx} role={m.role} content={m.content} timestamp={m.timestamp} />
   )), [messages]);
 
-  // If dashboard should be shown, render split view
-  if (showDashboard) {
-    console.log('Rendering split view with dashboard data:', dashboardData);
-    console.log('showDashboard state:', showDashboard);
+  // Show onboarding form if not completed
+  if (!onboardingComplete) {
     return (
-      <div style={{ 
-        height: '100vh', 
-        display: 'grid', 
-        gridTemplateColumns: '1fr 1fr', 
-        gap: '16px',
-        padding: '16px',
-        background: '#ffffff'
+      <div className="chat-page" style={{ 
+        minHeight: '100vh', 
+        background: 'linear-gradient(to bottom, #EAF9FF 0%, #ffffff 100%)',
+        padding: '40px 20px'
       }}>
-        {/* Left: Chat Interface */}
-        <div style={{ 
-          height: '100%', 
-          display: 'flex', 
-          flexDirection: 'column',
-          background: '#ffffff',
-          borderRadius: '12px',
-          border: '1px solid rgba(2, 6, 23, 0.06)',
-          boxShadow: '0 1px 2px rgba(2, 6, 23, 0.06), 0 4px 12px rgba(2, 6, 23, 0.04)'
-        }}>
-          {/* Chat Header */}
-          <div style={{ 
-            padding: '16px 20px', 
-            borderBottom: '1px solid rgba(2, 6, 23, 0.06)',
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'space-between'
-          }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
-              <div style={{ width: '32px', height: '32px', background: '#E6F7FF', borderRadius: '50%', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-                <img src={process.env.PUBLIC_URL + '/Miles_logo.png'} alt="Miles" style={{ width: '24px', height: '24px' }} />
-              </div>
-              <div>
-                <h2 style={{ margin: 0, fontSize: '16px', fontWeight: '600', color: '#004C8C' }}>Miles</h2>
-                <p style={{ margin: 0, fontSize: '12px', color: 'rgba(2, 6, 23, 0.6)' }}>Travel Assistant</p>
+        <header className="chat-header">
+          <div className="container">
+            <div className="chat-header-content">
+              <button className="back-button" onClick={() => window.location.href = '/'}>
+                <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
+                  <path d="M12.5 15L7.5 10L12.5 5" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
+                </svg>
+                Back to Home
+              </button>
+              <div className="chat-header-info">
+                <div className="chat-header-icon" style={{ width: '48px', height: '48px', padding: '6px', background: '#E6F7FF', borderRadius: '50%', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                  <img src={process.env.PUBLIC_URL + '/Miles_logo.png'} alt="Miles" style={{ width: '36px', height: '36px' }} />
+                </div>
+                <div>
+                  <h1 className="chat-title">Miles</h1>
+                  <p className="chat-status" style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                    <span style={{ width: '8px', height: '8px', borderRadius: '50%', background: '#00ff00', display: 'inline-block' }}></span>
+                    Online • Let's personalize your experience
+                  </p>
+                </div>
               </div>
             </div>
-            <button 
-              onClick={onHideDashboard}
-              style={{
-                background: 'none',
-                border: 'none',
-                color: 'rgba(2, 6, 23, 0.6)',
-                cursor: 'pointer',
-                padding: '4px',
-                borderRadius: '4px'
-              }}
-              title="Close Dashboard"
-            >
-              ✕
-            </button>
           </div>
-          
-          {/* Chat Messages */}
-          <div style={{ flex: 1, overflow: 'auto', padding: '16px' }} ref={scrollRef}>
-            {rendered}
-            {isTyping && (
-              <div className="message-row">
-                <div className="avatar avatar-assistant">
-                  <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
-                    <circle cx="8" cy="8" r="8" fill="#00ADEF"/>
-                  </svg>
-                </div>
-                <div className="typing">
-                  <span className="dot" />
-                  <span className="dot" />
-                  <span className="dot" />
-                </div>
-              </div>
-            )}
-          </div>
-          
-          {/* Chat Input */}
-          <div style={{ padding: '16px', borderTop: '1px solid rgba(2, 6, 23, 0.06)' }}>
-            <ChatInput onSend={handleSend} disabled={isTyping} />
-          </div>
-        </div>
-        
-        {/* Right: Flight Dashboard */}
-        <div style={{ height: '100%' }}>
-          <FlightDashboard searchData={dashboardData} />
+        </header>
+        <div style={{ marginTop: '40px' }}>
+          <TripPreferencesForm onComplete={handleOnboardingComplete} />
         </div>
       </div>
     );

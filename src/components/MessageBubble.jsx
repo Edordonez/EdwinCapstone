@@ -398,6 +398,7 @@ function renderMarkdown(content) {
   const elements = [];
   let inTable = false;
   let tableRows = [];
+  let tableIndex = 0; // Track table index for unique keys
   
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i].trim();
@@ -425,7 +426,7 @@ function renderMarkdown(content) {
     else if (line.startsWith('- ')) {
       if (inTable) {
         // Close table first
-        elements.push(renderTable(tableRows));
+        elements.push(renderTable(tableRows, tableIndex++));
         inTable = false;
         tableRows = [];
       }
@@ -435,7 +436,7 @@ function renderMarkdown(content) {
     else if (/^\d+\.\s/.test(line)) {
       if (inTable) {
         // Close table first
-        elements.push(renderTable(tableRows));
+        elements.push(renderTable(tableRows, tableIndex++));
         inTable = false;
         tableRows = [];
       }
@@ -445,7 +446,7 @@ function renderMarkdown(content) {
     else if (line) {
       if (inTable) {
         // Close table first
-        elements.push(renderTable(tableRows));
+        elements.push(renderTable(tableRows, tableIndex++));
         inTable = false;
         tableRows = [];
       }
@@ -455,7 +456,7 @@ function renderMarkdown(content) {
     else {
       if (inTable) {
         // Close table first
-        elements.push(renderTable(tableRows));
+        elements.push(renderTable(tableRows, tableIndex++));
         inTable = false;
         tableRows = [];
       }
@@ -465,7 +466,7 @@ function renderMarkdown(content) {
   
   // Close any remaining table
   if (inTable) {
-    elements.push(renderTable(tableRows));
+    elements.push(renderTable(tableRows, tableIndex++));
   }
   
   return elements;
@@ -605,11 +606,15 @@ function renderCellContent(cell, rowIndex, cellIndex) {
   return cell;
 }
 
-function renderTable(rows) {
+function renderTable(rows, tableIndex = 0) {
   if (rows.length === 0) return null;
   
+  // Generate a unique key for the table using index and a hash of first row content
+  const firstRowHash = rows[0] ? rows[0].join('|').substring(0, 20) : '';
+  const uniqueKey = `table-${tableIndex}-${rows.length}-${firstRowHash}`;
+  
   return (
-    <div key={`table-${rows.length}-${rows[0]?.length || 0}`} style={{ margin: '8px 0', overflowX: 'auto' }}>
+    <div key={uniqueKey} style={{ margin: '8px 0', overflowX: 'auto' }}>
       <table style={{ 
         width: '100%', 
         borderCollapse: 'collapse', 
@@ -620,12 +625,12 @@ function renderTable(rows) {
       }}>
         <tbody>
           {rows.map((row, rowIndex) => (
-            <tr key={rowIndex} style={{ 
+            <tr key={`${uniqueKey}-row-${rowIndex}`} style={{ 
               backgroundColor: rowIndex % 2 === 0 ? '#ffffff' : '#f8fafc',
               borderBottom: rowIndex < rows.length - 1 ? '1px solid var(--border)' : 'none'
             }}>
               {row.map((cell, cellIndex) => (
-                <td key={cellIndex} style={{ 
+                <td key={`${uniqueKey}-cell-${rowIndex}-${cellIndex}`} style={{ 
                   padding: '8px 12px', 
                   textAlign: cellIndex === 0 ? 'center' : 'left', // Center align the first column (Book Now)
                   borderRight: cellIndex < row.length - 1 ? '1px solid var(--border)' : 'none',

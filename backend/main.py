@@ -1,7 +1,7 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from typing import Optional
+from typing import Optional, Dict, List, Any
 from dotenv import load_dotenv
 import os
 from openai import OpenAI
@@ -10,12 +10,13 @@ import pytz
 import logging
 import uuid
 import asyncio
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # Import our services
 from services.amadeus_service import AmadeusService
 from services.intent_detector import IntentDetector
 from services.cache_manager import CacheManager
-from services.flight_formatter import format_flight_for_dashboard
+
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -102,6 +103,19 @@ class ChatRequest(BaseModel):
     messages: list  # list of {role, content}
     context: Context = None
     session_id: str = None
+    preferences: Optional[Dict[str, float]] = None  # User preferences from onboarding: {budget, quality, convenience}
+
+class TripPreferences(BaseModel):
+    budget: float
+    quality: float
+    convenience: float
+
+class OptimalItineraryRequest(BaseModel):
+    flights: List[Dict[str, Any]]
+    hotels: List[Dict[str, Any]]
+    activities: List[Dict[str, Any]]
+    preferences: Dict[str, float]  # {budget, quality, convenience}
+    userBudget: float
 
 
 @app.get("/")
@@ -288,7 +302,7 @@ def get_location_string(user_location):
         parts.append(user_location.country)
     return ", ".join(parts) if parts else "Unknown location"
 
-def create_system_prompt(context, amadeus_data=None):
+def create_system_prompt(context, amadeus_data=None, origin=None, destination=None, departure_date=None, return_date=None):
     """Create the Miles travel assistant system prompt with context and real-time data"""
     if not context:
         local_time = ""
@@ -319,7 +333,7 @@ def create_system_prompt(context, amadeus_data=None):
         now_iso, user_tz, user_location_city, user_location_country, user_location_lat, user_location_lon,
     )
     
-    system_prompt = f"""You are "Miles," a travel-planning assistant embedded in a web app. You must produce clean, skimmable answers and use the runtime context the app sends.
+    system_prompt = f"""You are "Miles," a comprehensive travel-planning assistant embedded in a web app. You help users with ALL aspects of travel planning including flights, hotels, activities, tours, and general travel advice. You must produce clean, skimmable answers and use the runtime context the app sends.
 
 Runtime context (always provided by the app):
 - now_iso: {now_iso}
@@ -509,7 +523,9 @@ Output:
     if amadeus_data and not amadeus_data.get('error'):
         data_section = "\n\n🚨 CRITICAL: REAL-TIME TRAVEL DATA PROVIDED 🚨\n"
         data_section += "YOU MUST USE THIS REAL-TIME DATA IN YOUR RESPONSE. DO NOT PROVIDE GENERIC ADVICE.\n"
-        data_section += "PRIORITIZE THIS DATA OVER ANY GENERAL KNOWLEDGE.\n\n"
+        data_section += "PRIORITIZE THIS DATA OVER ANY GENERAL KNOWLEDGE.\n"
+        data_section += "YOUR RESPONSE MUST INCLUDE THE ACTUAL FLIGHT DATA BELOW. DO NOT SAY 'Check out the dashboard' - THE DASHBOARD HAS BEEN REMOVED.\n"
+        data_section += "YOU MUST LIST THE ACTUAL FLIGHTS WITH PRICES, AIRLINES, AND TIMES IN YOUR RESPONSE.\n\n"
         
         if 'flights' in amadeus_data or 'outboundFlights' in amadeus_data:
             # Handle round-trip flight data with best combination
@@ -525,38 +541,143 @@ Output:
             
             # Show individual flight options in table format
             if 'outboundFlights' in amadeus_data:
-                data_section += f"# Flights from {origin} to {destination}\n"
-                data_section += f"## Best Options\n"
-                data_section += f"| Book Now | Airline | Flight Code | Price | Duration | Stops | Departure |\n"
+                # Use provided origin/destination or fallback to defaults
+                origin_display = origin or "origin"
+                destination_display = destination or "destination"
+                data_section += f"# Flights from {origin_display} to {destination_display}\n"
+                
+                # Add requested dates if available
+                if departure_date:
+                    from datetime import datetime
+                    try:
+                        dep_date = datetime.strptime(departure_date, "%Y-%m-%d")
+                        dep_display = dep_date.strftime("%B %d, %Y")
+                        data_section += f"**Requested Departure Date: {dep_display}**\n"
+                    except:
+                        data_section += f"**Requested Departure Date: {departure_date}**\n"
+                if return_date:
+                    from datetime import datetime
+                    try:
+                        ret_date = datetime.strptime(return_date, "%Y-%m-%d")
+                        ret_display = ret_date.strftime("%B %d, %Y")
+                        data_section += f"**Requested Return Date: {ret_display}**\n"
+                    except:
+                        data_section += f"**Requested Return Date: {return_date}**\n"
+                
+                # Check if multiple airports were searched
+                if amadeus_data.get('_multi_airport_search'):
+                    origin_airports = amadeus_data.get('_origin_airports', [])
+                    dest_airports = amadeus_data.get('_destination_airports', [])
+                    if origin_airports and len(origin_airports) > 1:
+                        data_section += f"\n**Note: Flights from multiple airports are included: {', '.join(origin_airports)}**\n"
+                    if dest_airports and len(dest_airports) > 1:
+                        data_section += f"**Note: Flights to multiple airports are included: {', '.join(dest_airports)}**\n"
+                
+                data_section += "\n"
+                data_section += f"## Outbound Flights\n"
+                data_section += f"| Book Now | Airline | Flight Code | Origin | Destination | Price | Duration | Stops/Layover | Departure | Arrival |\n"
+                data_section += f"|----------|---------|-------------|--------|-------------|-------|----------|----------------|-----------|----------|\n"
                 
                 for flight in amadeus_data['outboundFlights'][:5]:  # Show up to 5 flights
                     # Extract flight code from flightNumber (e.g., "AF 123" -> "AF123")
                     flight_code = flight.get('flightNumber', '').replace(' ', '')
                     
+                    # Get origin and destination airports from flight metadata or segments
+                    origin_airport = flight.get('_origin_airport') or flight.get('departureAirport') or origin_display
+                    dest_airport = flight.get('_destination_airport') or flight.get('arrivalAirport') or destination_display
+                    
                     # Create booking link based on airline
                     booking_link = _generate_booking_link(flight.get('airline', ''), flight_code)
                     
-                    # Format stops
+                    # Format stops and layover info
                     stops = flight.get('stops', 0)
                     stops_display = "Non-stop" if stops == 0 else f"{stops} stop{'s' if stops > 1 else ''}"
+                    
+                    # Add layover information if available
+                    layover_info = ""
+                    if stops > 0 and 'segments' in flight:
+                        segments = flight.get('segments', [])
+                        if len(segments) > 1:
+                            layovers = []
+                            for i in range(len(segments) - 1):
+                                arr_time = segments[i].get('arrival', {}).get('time', '')
+                                dep_time = segments[i+1].get('departure', {}).get('time', '')
+                                layover_airport = segments[i].get('arrival', {}).get('airport', '')
+                                if arr_time and dep_time:
+                                    try:
+                                        from datetime import datetime
+                                        arr_dt = datetime.fromisoformat(arr_time.replace('Z', '+00:00'))
+                                        dep_dt = datetime.fromisoformat(dep_time.replace('Z', '+00:00'))
+                                        layover_duration = dep_dt - arr_dt
+                                        hours = layover_duration.seconds // 3600
+                                        minutes = (layover_duration.seconds % 3600) // 60
+                                        layovers.append(f"{layover_airport} ({hours}h {minutes}m)")
+                                    except:
+                                        layovers.append(layover_airport)
+                            if layovers:
+                                layover_info = " | " + ", ".join(layovers)
                     
                     # Format departure time with date
                     departure_time = flight.get('departure', '')
                     arrival_time = flight.get('arrival', '')
                     
-                    data_section += f"| [Book Now]({booking_link}) | {flight['airline']} | {flight_code} | ${flight['price']} | {flight['duration']} | {stops_display} | {departure_time} |\n"
+                    # Format price with currency (always USD)
+                    price = flight.get('price', 0)
+                    price_display = f"${price}"
+                    
+                    data_section += f"| [Book Now]({booking_link}) | {flight.get('airline', 'Unknown')} | {flight_code} | {origin_airport} | {dest_airport} | {price_display} | {flight.get('duration', 'N/A')} | {stops_display}{layover_info} | {departure_time} | {arrival_time} |\n"
                 
                 if 'returnFlights' in amadeus_data and amadeus_data['returnFlights']:
                     data_section += f"\n## Return Flights\n"
-                    data_section += f"| Book Now | Airline | Flight Code | Price | Duration | Stops | Departure |\n"
+                    data_section += f"| Book Now | Airline | Flight Code | Origin | Destination | Price | Duration | Stops/Layover | Departure | Arrival |\n"
+                    data_section += f"|----------|---------|-------------|--------|-------------|-------|----------|----------------|-----------|----------|\n"
                     
                     for flight in amadeus_data['returnFlights'][:5]:
                         flight_code = flight.get('flightNumber', '').replace(' ', '')
+                        
+                        # Get origin and destination airports from flight metadata or segments
+                        # For return flights, origin is the destination city's airport and vice versa
+                        return_origin_airport = flight.get('_origin_airport') or flight.get('departureAirport') or destination_display
+                        return_dest_airport = flight.get('_destination_airport') or flight.get('arrivalAirport') or origin_display
+                        
                         booking_link = _generate_booking_link(flight.get('airline', ''), flight_code)
+                        
+                        # Format stops and layover info
                         stops = flight.get('stops', 0)
                         stops_display = "Non-stop" if stops == 0 else f"{stops} stop{'s' if stops > 1 else ''}"
                         
-                        data_section += f"| [Book Now]({booking_link}) | {flight['airline']} | {flight_code} | ${flight['price']} | {flight['duration']} | {stops_display} | {flight['departure']} |\n"
+                        # Add layover information if available
+                        layover_info = ""
+                        if stops > 0 and 'segments' in flight:
+                            segments = flight.get('segments', [])
+                            if len(segments) > 1:
+                                layovers = []
+                                for i in range(len(segments) - 1):
+                                    arr_time = segments[i].get('arrival', {}).get('time', '')
+                                    dep_time = segments[i+1].get('departure', {}).get('time', '')
+                                    layover_airport = segments[i].get('arrival', {}).get('airport', '')
+                                    if arr_time and dep_time:
+                                        try:
+                                            from datetime import datetime
+                                            arr_dt = datetime.fromisoformat(arr_time.replace('Z', '+00:00'))
+                                            dep_dt = datetime.fromisoformat(dep_time.replace('Z', '+00:00'))
+                                            layover_duration = dep_dt - arr_dt
+                                            hours = layover_duration.seconds // 3600
+                                            minutes = (layover_duration.seconds % 3600) // 60
+                                            layovers.append(f"{layover_airport} ({hours}h {minutes}m)")
+                                        except:
+                                            layovers.append(layover_airport)
+                                if layovers:
+                                    layover_info = " | " + ", ".join(layovers)
+                        
+                        return_departure = flight.get('departure', '')
+                        return_arrival = flight.get('arrival', '')
+                        
+                        # Format price with currency (always USD)
+                        price = flight.get('price', 0)
+                        price_display = f"${price}"
+                        
+                        data_section += f"| [Book Now]({booking_link}) | {flight.get('airline', 'Unknown')} | {flight_code} | {return_origin_airport} | {return_dest_airport} | {price_display} | {flight.get('duration', 'N/A')} | {stops_display}{layover_info} | {return_departure} | {return_arrival} |\n"
             else:
                 # Fallback for old format
                 data_section += f"FLIGHTS ({amadeus_data.get('count', 0)} found):\n"
@@ -575,10 +696,51 @@ Output:
                 
         elif 'activities' in amadeus_data:
             data_section += f"ACTIVITIES ({amadeus_data.get('count', 0)} found):\n"
-            for i, activity in enumerate(amadeus_data['activities'][:3], 1):
+            for i, activity in enumerate(amadeus_data['activities'][:5], 1):
                 name = activity.get('name', 'N/A')
-                price = activity.get('price', 'N/A')
-                data_section += f"{i}. {name} - {price}\n"
+                short_desc = activity.get('shortDescription', '')
+                description = activity.get('description', '')
+                price_info = activity.get('price', {})
+                price_amount = price_info.get('amount', 'N/A') if isinstance(price_info, dict) else price_info
+                currency = price_info.get('currencyCode', '') if isinstance(price_info, dict) else ''
+                rating = activity.get('rating', 'N/A')
+                duration = activity.get('minimumDuration', '')
+                booking_link = activity.get('bookingLink', '')
+                pictures = activity.get('pictures', [])
+                geo_code = activity.get('geoCode', {})
+                
+                data_section += f"{i}. {name}\n"
+                if short_desc:
+                    data_section += f"   Description: {short_desc}\n"
+                if description and description != short_desc:
+                    data_section += f"   Full Description: {description}\n"
+                if price_amount and price_amount != 'N/A':
+                    price_str = f"{price_amount} {currency}".strip()
+                    data_section += f"   Price: {price_str}\n"
+                if rating and rating != 'N/A':
+                    data_section += f"   Rating: {rating}\n"
+                if duration:
+                    data_section += f"   Duration: {duration}\n"
+                if booking_link:
+                    data_section += f"   Booking: {booking_link}\n"
+                if geo_code and isinstance(geo_code, dict):
+                    lat = geo_code.get('latitude')
+                    lon = geo_code.get('longitude')
+                    if lat and lon:
+                        data_section += f"   Location: {lat}, {lon}\n"
+                if pictures:
+                    data_section += f"   Images: {len(pictures)} picture(s) available\n"
+                data_section += "\n"
+            
+            data_section += "\n⚠️ IMPORTANT: You are a travel assistant helping users find things to do and activities in their destination.\n"
+            data_section += "1. Start by saying 'I found the following activities for you:' or similar friendly greeting\n"
+            data_section += "2. Present the activities in a clear, organized format (use markdown tables or lists)\n"
+            data_section += "3. Include activity name, description, price, rating, and duration when available\n"
+            data_section += "4. If booking links are available, mention them (e.g., 'Book now' with link)\n"
+            data_section += "5. Be enthusiastic and helpful - these are real activities users can book!\n"
+            data_section += "6. If there are pictures available, mention that photos are available\n"
+            data_section += "7. Make recommendations based on ratings and user preferences if mentioned\n"
+            data_section += "8. Use friendly, engaging language - this is about helping users discover amazing experiences!\n"
                 
         elif 'destinations' in amadeus_data:
             data_section += f"FLIGHT DESTINATIONS ({amadeus_data.get('count', 0)} found):\n"
@@ -588,12 +750,77 @@ Output:
                 data_section += f"{i}. {destination} - {price}\n"
         
         data_section += f"\nData fetched at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+        data_section += "\n🚨 MANDATORY RESPONSE FORMAT 🚨\n"
+        
+        # Check if this is a round-trip flight (has returnFlights)
+        has_return_flights = 'returnFlights' in amadeus_data and amadeus_data.get('returnFlights')
+        
+        if has_return_flights:
+            data_section += "⚠️ IMPORTANT: This is a ROUND-TRIP flight search. You MUST display BOTH outbound AND return flights separately.\n"
+            if departure_date:
+                from datetime import datetime
+                try:
+                    dep_date = datetime.strptime(departure_date, "%Y-%m-%d")
+                    dep_display = dep_date.strftime("%B %d, %Y")
+                    data_section += f"⚠️ CRITICAL: The user requested departure date is {dep_display}. You MUST show flights that depart on this date (or very close to it).\n"
+                except:
+                    pass
+            if return_date:
+                from datetime import datetime
+                try:
+                    ret_date = datetime.strptime(return_date, "%Y-%m-%d")
+                    ret_display = ret_date.strftime("%B %d, %Y")
+                    data_section += f"⚠️ CRITICAL: The user requested return date is {ret_date.strftime('%B %d, %Y')}. You MUST show flights that depart on this date (or very close to it).\n"
+                except:
+                    pass
+            data_section += "1. Start by saying 'I found the following round-trip flight options for you:'\n"
+            data_section += "2. FIRST, display the OUTBOUND flights (from origin to destination) in a clear section titled '## Outbound Flights'\n"
+            data_section += "3. THEN, display the RETURN flights (from destination back to origin) in a separate section titled '## Return Flights'\n"
+            data_section += "4. Include airline names, flight numbers, prices, departure/arrival times, and duration for EACH flight\n"
+            data_section += "5. Use markdown tables to display the flights clearly\n"
+            data_section += "6. CRITICAL: Display the ACTUAL dates from the flight data in the table. The departure and arrival dates shown in the flight data MUST match the dates the user requested.\n"
+            data_section += "7. DO NOT mention 'dashboard' or 'check out the dashboard' - the dashboard has been removed\n"
+            data_section += "8. Make sure to show both outbound and return flights - this is a round-trip, so both directions are required!\n"
+        else:
+            data_section += "1. Start by saying 'I found the following flight options for you:'\n"
+            data_section += "2. List the actual flights from the data above in a clear format\n"
+            data_section += "3. Include airline names, flight numbers, prices, departure/arrival times, and duration\n"
+            data_section += "4. DO NOT mention 'dashboard' or 'check out the dashboard' - the dashboard has been removed\n"
+            data_section += "5. Present the information in a clear, user-friendly format using markdown tables or lists\n"
+        
         system_prompt += data_section
     elif amadeus_data and amadeus_data.get('error'):
-        # Handle API errors
+        # Handle API errors with specific, actionable error messages
         error_msg = amadeus_data.get('error', 'Unknown error')
-        system_prompt += f"\n\n⚠️ API Error: {error_msg}\n"
-        system_prompt += "Please try rephrasing your request with specific dates and locations, or try a different search.\n"
+        
+        # Generate specific error message based on error type
+        if 'Missing' in error_msg or 'missing' in error_msg.lower():
+            if 'origin' in error_msg.lower() or 'destination' in error_msg.lower():
+                specific_error = "MISSING INFORMATION: Please provide both origin and destination cities (e.g., 'flights from New York to Paris')."
+            elif 'date' in error_msg.lower():
+                specific_error = "MISSING DATE: Please provide a departure date (e.g., 'November 3rd' or '11/03/2024')."
+            else:
+                specific_error = f"MISSING INFORMATION: {error_msg}"
+        elif 'Invalid' in error_msg or 'invalid' in error_msg.lower():
+            if 'date' in error_msg.lower():
+                specific_error = "INVALID DATE FORMAT: Please provide dates in a valid format (e.g., 'November 3rd, 2024', '11/03/2024', or 'Nov 3')."
+            else:
+                specific_error = f"INVALID INPUT: {error_msg}"
+        elif 'API call failed' in error_msg:
+            specific_error = "API ERROR: Unable to fetch flight data. Please check your connection and try again."
+        elif 'No flights available' in error_msg:
+            specific_error = "NO FLIGHTS FOUND: No flights available for the specified route and dates. Please try different dates or destinations."
+        else:
+            specific_error = f"ERROR: {error_msg}"
+        
+        system_prompt += f"\n\n⚠️ IMPORTANT: There was an error processing your flight search request.\n"
+        system_prompt += f"ERROR DETAILS: {specific_error}\n\n"
+        system_prompt += "YOUR RESPONSE MUST:\n"
+        system_prompt += "1. Clearly state what went wrong (e.g., 'I couldn't find flights because [specific reason]')\n"
+        system_prompt += "2. Tell the user exactly what information is missing or incorrect\n"
+        system_prompt += "3. Provide a helpful example of the correct format\n"
+        system_prompt += "4. Be friendly and helpful, not technical\n\n"
+        system_prompt += "Example: 'I couldn't find flights because the departure date wasn't provided. Please try again with a date, like: \"flights from New York to Paris on November 15th\"'\n"
     
     return system_prompt
 
@@ -672,6 +899,495 @@ def format_place_names(text):
     
     return text
 
+def generateOptimalItinerary(flights: List[Dict[str, Any]], hotels: List[Dict[str, Any]], 
+                              activities: List[Dict[str, Any]], preferences: Dict[str, float],
+                              userBudget: float) -> Dict[str, Any]:
+    """
+    Generate optimal itinerary by combining flights, hotels, and activities
+    based on weighted user preferences.
+    
+    Args:
+        flights: List of flight objects with price, duration, rating, etc.
+        hotels: List of hotel objects with price, rating, distance, etc.
+        activities: List of activity objects with price, rating, duration, etc.
+        preferences: Dict with budget, quality, convenience weights (0-1, should sum to 1)
+        userBudget: Maximum total budget for the combination
+        
+    Returns:
+        Dict containing optimal combination with scores and insights
+    """
+    budget_weight = preferences.get('budget', 0.33)
+    quality_weight = preferences.get('quality', 0.33)
+    convenience_weight = preferences.get('convenience', 0.34)
+    
+    # Normalize weights to ensure they sum to 1
+    total_weight = budget_weight + quality_weight + convenience_weight
+    if total_weight > 0:
+        budget_weight /= total_weight
+        quality_weight /= total_weight
+        convenience_weight /= total_weight
+    else:
+        budget_weight = quality_weight = convenience_weight = 1/3
+    
+    logger.info(f"[OPTIMAL_ITINERARY] Weights: budget={budget_weight:.3f}, quality={quality_weight:.3f}, convenience={convenience_weight:.3f}")
+    
+    # Normalize metrics on 0-1 scale for each category
+    def normalize_flight_metrics(flight_list):
+        """Extract and normalize flight metrics"""
+        if not flight_list:
+            return []
+        
+        # Extract prices, durations, and ratings
+        prices = []
+        durations = []  # in hours
+        ratings = []
+        
+        for flight in flight_list:
+            # Extract price (handle different formats)
+            price = flight.get('price', 0)
+            if isinstance(price, dict):
+                price = price.get('total', price.get('amount', 0))
+            prices.append(float(price) if price else 0)
+            
+            # Extract duration (convert ISO duration to hours)
+            duration_str = flight.get('duration', 'PT0H')
+            if isinstance(duration_str, str) and duration_str.startswith('PT'):
+                duration_str = duration_str[2:]
+                hours = 0
+                minutes = 0
+                if 'H' in duration_str:
+                    hours = int(duration_str.split('H')[0])
+                    duration_str = duration_str.split('H')[1]
+                if 'M' in duration_str:
+                    minutes = int(duration_str.split('M')[0])
+                durations.append(hours + minutes / 60.0)
+            else:
+                # Try to extract from itineraries
+                itineraries = flight.get('itineraries', [])
+                if itineraries:
+                    dur_str = itineraries[0].get('duration', 'PT0H')
+                    if isinstance(dur_str, str) and dur_str.startswith('PT'):
+                        dur_str = dur_str[2:]
+                        h = int(dur_str.split('H')[0]) if 'H' in dur_str else 0
+                        m = int(dur_str.split('H')[1].split('M')[0]) if 'H' in dur_str and 'M' in dur_str.split('H')[1] else (int(dur_str.split('M')[0]) if 'M' in dur_str else 0)
+                        durations.append(h + m / 60.0)
+                    else:
+                        durations.append(8.0)  # Default
+                else:
+                    durations.append(8.0)  # Default
+            
+            # Extract rating (flights typically don't have ratings, use 4.0 default)
+            rating = flight.get('rating', 4.0)
+            if rating is None:
+                rating = 4.0
+            ratings.append(float(rating) if rating else 4.0)
+        
+        # Find max values for normalization
+        max_price = max(prices) if prices else 1
+        max_duration = max(durations) if durations else 1
+        max_rating = max(ratings) if ratings else 5
+        
+        # Normalize each flight
+        normalized_flights = []
+        for i, flight in enumerate(flight_list):
+            price = prices[i]
+            duration = durations[i]
+            rating = ratings[i]
+            
+            # Budget score: 1 - (price / maxPrice) - lower price is better
+            budget_score = 1 - (price / max_price) if max_price > 0 else 0.5
+            
+            # Quality score: rating / 5 - higher rating is better
+            quality_score = rating / 5.0
+            
+            # Convenience score: 1 - (duration / maxDuration) - shorter duration is better
+            convenience_score = 1 - (duration / max_duration) if max_duration > 0 else 0.5
+            
+            # Calculate category score
+            category_score = (
+                budget_weight * budget_score +
+                quality_weight * quality_score +
+                convenience_weight * convenience_score
+            )
+            
+            normalized_flights.append({
+                **flight,
+                '_budget_score': budget_score,
+                '_quality_score': quality_score,
+                '_convenience_score': convenience_score,
+                '_category_score': category_score,
+                '_price': price,
+                '_duration': duration,
+                '_rating': rating
+            })
+        
+        return normalized_flights
+    
+    def normalize_hotel_metrics(hotel_list):
+        """Extract and normalize hotel metrics"""
+        if not hotel_list:
+            return []
+        
+        prices = []
+        ratings = []
+        distances = []  # distance from city center (km)
+        
+        for hotel in hotel_list:
+            # Extract price
+            price = hotel.get('price', 0)
+            if isinstance(price, dict):
+                price = price.get('total', price.get('amount', 0))
+            prices.append(float(price) if price else 0)
+            
+            # Extract rating
+            rating = hotel.get('rating', 3.0)
+            if rating is None:
+                rating = 3.0
+            ratings.append(float(rating) if rating else 3.0)
+            
+            # Extract distance (default to 5km if not available)
+            distance = hotel.get('distance', hotel.get('distanceFromCenter', 5.0))
+            distances.append(float(distance) if distance else 5.0)
+        
+        max_price = max(prices) if prices else 1
+        max_rating = max(ratings) if ratings else 5
+        max_distance = max(distances) if distances else 1
+        
+        normalized_hotels = []
+        for i, hotel in enumerate(hotel_list):
+            price = prices[i]
+            rating = ratings[i]
+            distance = distances[i]
+            
+            budget_score = 1 - (price / max_price) if max_price > 0 else 0.5
+            quality_score = rating / 5.0
+            convenience_score = 1 - (distance / max_distance) if max_distance > 0 else 0.5
+            
+            category_score = (
+                budget_weight * budget_score +
+                quality_weight * quality_score +
+                convenience_weight * convenience_score
+            )
+            
+            normalized_hotels.append({
+                **hotel,
+                '_budget_score': budget_score,
+                '_quality_score': quality_score,
+                '_convenience_score': convenience_score,
+                '_category_score': category_score,
+                '_price': price,
+                '_rating': rating,
+                '_distance': distance
+            })
+        
+        return normalized_hotels
+    
+    def normalize_activity_metrics(activity_list):
+        """Extract and normalize activity metrics"""
+        if not activity_list:
+            return []
+        
+        prices = []
+        ratings = []
+        durations = []  # in hours
+        
+        for activity in activity_list:
+            # Extract price
+            price_info = activity.get('price', {})
+            if isinstance(price_info, dict):
+                price = price_info.get('amount', price_info.get('total', 0))
+            else:
+                price = price_info if price_info else 0
+            prices.append(float(price) if price else 0)
+            
+            # Extract rating
+            rating = activity.get('rating', 4.0)
+            if rating is None:
+                rating = 4.0
+            ratings.append(float(rating) if rating else 4.0)
+            
+            # Extract duration
+            duration_str = activity.get('minimumDuration', activity.get('duration', 'PT2H'))
+            if isinstance(duration_str, str) and duration_str.startswith('PT'):
+                duration_str = duration_str[2:]
+                hours = int(duration_str.split('H')[0]) if 'H' in duration_str else 0
+                minutes = int(duration_str.split('H')[1].split('M')[0]) if 'H' in duration_str and 'M' in duration_str.split('H')[1] else (int(duration_str.split('M')[0]) if 'M' in duration_str else 0)
+                durations.append(hours + minutes / 60.0)
+            elif isinstance(duration_str, (int, float)):
+                durations.append(float(duration_str))
+            else:
+                durations.append(2.0)  # Default 2 hours
+        
+        max_price = max(prices) if prices else 1
+        max_rating = max(ratings) if ratings else 5
+        max_duration = max(durations) if durations else 1
+        
+        normalized_activities = []
+        for i, activity in enumerate(activity_list):
+            price = prices[i]
+            rating = ratings[i]
+            duration = durations[i]
+            
+            budget_score = 1 - (price / max_price) if max_price > 0 else 0.5
+            quality_score = rating / 5.0
+            convenience_score = 1 - (duration / max_duration) if max_duration > 0 else 0.5
+            
+            category_score = (
+                budget_weight * budget_score +
+                quality_weight * quality_score +
+                convenience_weight * convenience_score
+            )
+            
+            normalized_activities.append({
+                **activity,
+                '_budget_score': budget_score,
+                '_quality_score': quality_score,
+                '_convenience_score': convenience_score,
+                '_category_score': category_score,
+                '_price': price,
+                '_rating': rating,
+                '_duration': duration
+            })
+        
+        return normalized_activities
+    
+    # Normalize all categories
+    normalized_flights = normalize_flight_metrics(flights)
+    normalized_hotels = normalize_hotel_metrics(hotels)
+    normalized_activities = normalize_activity_metrics(activities)
+    
+    logger.info(f"[OPTIMAL_ITINERARY] Normalized: {len(normalized_flights)} flights, {len(normalized_hotels)} hotels, {len(normalized_activities)} activities")
+    
+    # Find best combination
+    best_combination = None
+    best_total_score = -1
+    total_combinations = len(normalized_flights) * len(normalized_hotels) * len(normalized_activities)
+    
+    logger.info(f"[OPTIMAL_ITINERARY] Evaluating {total_combinations} combinations...")
+    
+    for flight in normalized_flights:
+        for hotel in normalized_hotels:
+            for activity in normalized_activities:
+                # Calculate total price
+                total_price = flight['_price'] + hotel['_price'] + activity['_price']
+                
+                # Filter out if exceeds budget
+                if total_price > userBudget:
+                    continue
+                
+                # Calculate total combined score (average of three category scores)
+                total_score = (
+                    flight['_category_score'] +
+                    hotel['_category_score'] +
+                    activity['_category_score']
+                ) / 3.0
+                
+                # Update best if this is better
+                if total_score > best_total_score:
+                    best_total_score = total_score
+                    best_combination = {
+                        'flight': flight,
+                        'hotel': hotel,
+                        'activity': activity,
+                        'total_price': total_price,
+                        'total_score': total_score,
+                        'flight_score': flight['_category_score'],
+                        'hotel_score': hotel['_category_score'],
+                        'activity_score': activity['_category_score']
+                    }
+    
+    if not best_combination:
+        return {
+            'error': 'No valid combination found within budget',
+            'ok': False
+        }
+    
+    # Generate insight text
+    flight = best_combination['flight']
+    hotel = best_combination['hotel']
+    activity = best_combination['activity']
+    
+    insights = []
+    if budget_weight > 0.4:
+        insights.append("excellent value")
+    if quality_weight > 0.4:
+        insights.append("high quality options")
+    if convenience_weight > 0.4:
+        insights.append("minimal travel time")
+    
+    if not insights:
+        insights.append("balanced combination")
+    
+    insight_text = f"This combination offers the best balance of {', '.join(insights)} while staying within your budget."
+    
+    if budget_weight > 0.4 and best_combination['total_price'] < userBudget * 0.8:
+        insight_text += " You're saving significantly while still getting great options."
+    elif quality_weight > 0.4:
+        insight_text += " Premium quality selections that match your preferences."
+    elif convenience_weight > 0.4:
+        insight_text += " Optimized for convenience and minimal hassle."
+    
+    result = {
+        'ok': True,
+        'flight': {
+            'id': flight.get('id'),
+            'airline': flight.get('airline', 'Unknown'),
+            'flightNumber': flight.get('flightNumber', flight.get('flight_number', 'N/A')),
+            'price': flight['_price'],
+            'duration': flight['_duration'],
+            'rating': flight['_rating'],
+            'departure': flight.get('departure', flight.get('departureAirport', 'N/A')),
+            'arrival': flight.get('arrival', flight.get('arrivalAirport', 'N/A')),
+            'scores': {
+                'budget': flight['_budget_score'],
+                'quality': flight['_quality_score'],
+                'convenience': flight['_convenience_score'],
+                'total': flight['_category_score']
+            }
+        },
+        'hotel': {
+            'id': hotel.get('hotel_id', hotel.get('id')),
+            'name': hotel.get('name', 'Unknown Hotel'),
+            'price': hotel['_price'],
+            'rating': hotel['_rating'],
+            'distance': hotel['_distance'],
+            'location': hotel.get('location', hotel.get('city', 'N/A')),
+            'scores': {
+                'budget': hotel['_budget_score'],
+                'quality': hotel['_quality_score'],
+                'convenience': hotel['_convenience_score'],
+                'total': hotel['_category_score']
+            }
+        },
+        'activity': {
+            'id': activity.get('id'),
+            'name': activity.get('name', 'Unknown Activity'),
+            'price': activity['_price'],
+            'rating': activity['_rating'],
+            'duration': activity['_duration'],
+            'description': activity.get('shortDescription', activity.get('description', '')),
+            'scores': {
+                'budget': activity['_budget_score'],
+                'quality': activity['_quality_score'],
+                'convenience': activity['_convenience_score'],
+                'total': activity['_category_score']
+            }
+        },
+        'total_price': best_combination['total_price'],
+        'total_score': best_combination['total_score'],
+        'insight': insight_text
+    }
+    
+    logger.info(f"[OPTIMAL_ITINERARY] Best combination found: score={best_total_score:.3f}, price=${best_combination['total_price']:.2f}")
+    
+    return result
+
+
+@app.post("/api/generateOptimalItinerary")
+async def generate_optimal_itinerary_endpoint(req: OptimalItineraryRequest):
+    """
+    Generate optimal itinerary combining flights, hotels, and activities
+    """
+    try:
+        result = generateOptimalItinerary(
+            flights=req.flights,
+            hotels=req.hotels,
+            activities=req.activities,
+            preferences=req.preferences,
+            userBudget=req.userBudget
+        )
+        return result
+    except Exception as e:
+        logger.error(f"[OPTIMAL_ITINERARY] Error: {e}")
+        raise HTTPException(status_code=500, detail=f"Error generating optimal itinerary: {str(e)}")
+
+@app.post("/api/optimizeTrip")
+async def optimize_trip(preferences: TripPreferences):
+    """
+    Optimize trip recommendations based on user preferences.
+    Uses weighted scoring: score = budgetWeight * (1/price) + qualityWeight * rating + convenienceWeight * (1/travelTime)
+    """
+    try:
+        budget_weight = preferences.budget
+        quality_weight = preferences.quality
+        convenience_weight = preferences.convenience
+        
+        logger.info(f"[OPTIMIZE_TRIP] Received preferences: budget={budget_weight}, quality={quality_weight}, convenience={convenience_weight}")
+        
+        # Sample travel options (simulated data)
+        # In production, this would come from real flight/hotel APIs
+        sample_options = [
+            {"destination": "Paris, France", "price": 850.00, "rating": 4.5, "travelTime": 8.5},
+            {"destination": "Tokyo, Japan", "price": 1200.00, "rating": 4.8, "travelTime": 14.0},
+            {"destination": "Barcelona, Spain", "price": 750.00, "rating": 4.3, "travelTime": 7.5},
+            {"destination": "Bali, Indonesia", "price": 1100.00, "rating": 4.7, "travelTime": 20.0},
+            {"destination": "New York, USA", "price": 600.00, "rating": 4.2, "travelTime": 5.5},
+            {"destination": "Dubai, UAE", "price": 950.00, "rating": 4.6, "travelTime": 12.0},
+            {"destination": "Rome, Italy", "price": 800.00, "rating": 4.4, "travelTime": 9.0},
+            {"destination": "Bangkok, Thailand", "price": 900.00, "rating": 4.5, "travelTime": 16.0},
+            {"destination": "London, UK", "price": 700.00, "rating": 4.3, "travelTime": 7.0},
+            {"destination": "Sydney, Australia", "price": 1300.00, "rating": 4.7, "travelTime": 22.0},
+        ]
+        
+        # Normalize prices and travel times for scoring
+        # Find min/max for normalization
+        prices = [opt["price"] for opt in sample_options]
+        travel_times = [opt["travelTime"] for opt in sample_options]
+        min_price = min(prices)
+        max_price = max(prices)
+        min_travel_time = min(travel_times)
+        max_travel_time = max(travel_times)
+        
+        # Calculate normalized scores for each option
+        scored_options = []
+        for option in sample_options:
+            price = option["price"]
+            rating = option["rating"]
+            travel_time = option["travelTime"]
+            
+            # Normalize price (lower is better, so use inverse)
+            # Normalize to 0-1 range: (max - value) / (max - min)
+            normalized_price_score = (max_price - price) / (max_price - min_price) if max_price > min_price else 0.5
+            
+            # Normalize travel time (lower is better, so use inverse)
+            normalized_time_score = (max_travel_time - travel_time) / (max_travel_time - min_travel_time) if max_travel_time > min_travel_time else 0.5
+            
+            # Normalize rating (higher is better, already 0-5 scale, normalize to 0-1)
+            normalized_rating_score = rating / 5.0
+            
+            # Calculate weighted score
+            # Note: Using normalized_price_score and normalized_time_score ensures all components are 0-1 scale
+            score = (
+                budget_weight * normalized_price_score +
+                quality_weight * normalized_rating_score +
+                convenience_weight * normalized_time_score
+            )
+            
+            scored_options.append({
+                **option,
+                "score": score
+            })
+        
+        # Sort by score (highest first) and return top 3
+        scored_options.sort(key=lambda x: x["score"], reverse=True)
+        top_options = scored_options[:3]
+        
+        logger.info(f"[OPTIMIZE_TRIP] Returning top 3 options: {[opt['destination'] for opt in top_options]}")
+        
+        return {
+            "ok": True,
+            "options": top_options,
+            "weights": {
+                "budget": budget_weight,
+                "quality": quality_weight,
+                "convenience": convenience_weight
+            }
+        }
+    
+    except Exception as e:
+        logger.error(f"[OPTIMIZE_TRIP] Error: {e}")
+        raise HTTPException(status_code=500, detail=f"Error optimizing trip: {str(e)}")
+
 @app.post("/api/chat")
 async def chat(req: ChatRequest):
     try:
@@ -731,7 +1447,14 @@ async def chat(req: ChatRequest):
         
         amadeus_data = None
         
+        # Initialize route variables for system prompt
+        route_origin = None
+        route_destination = None
+        route_departure_date = None
+        route_return_date = None
+        
         # Always fetch flight data if flight keywords are detected, regardless of intent detection
+        route_info_extracted = None  # Store extracted route info for fallback
         if has_flight_keywords:
             logger.info("Flight keywords detected - using intent detection for route and dates")
             
@@ -744,25 +1467,38 @@ async def chat(req: ChatRequest):
                 return_date = intent["params"].get("return_date")
                 adults = intent["params"].get("adults", 1)
                 max_price = intent["params"].get("max_price")
+                
+                # Store for system prompt
+                route_origin = origin
+                route_destination = destination
+                route_departure_date = departure_date
+                route_return_date = return_date
             else:
                 logger.info("Intent detection incomplete - falling back to message extraction")
                 # Extract route information from the user's message
-                route_info = extract_route_from_message(user_message)
-                logger.info(f"Extracted route info: {route_info}")
+                route_info_extracted = extract_route_from_message(user_message)
+                logger.info(f"Extracted route info: {route_info_extracted}")
                 
                 # Extract dates from the user's message
                 date_info = extract_dates_from_message(user_message)
                 logger.info(f"Extracted date info: {date_info}")
                 
                 # Combine route and date information
-                route_info.update(date_info)
+                if route_info_extracted:
+                    route_info_extracted.update(date_info)
                 
-                origin = route_info.get('origin_code', '')
-                destination = route_info.get('destination_code', '')
-                departure_date = route_info.get('departure_date', '')
-                return_date = route_info.get('return_date')
+                origin = route_info_extracted.get('departureCode', '') if route_info_extracted else ''
+                destination = route_info_extracted.get('destinationCode', '') if route_info_extracted else ''
+                departure_date = route_info_extracted.get('departure_date', '') if route_info_extracted else ''
+                return_date = route_info_extracted.get('return_date') if route_info_extracted else None
                 adults = 1
                 max_price = None
+                
+                # Store for system prompt
+                route_origin = origin
+                route_destination = destination
+                route_departure_date = departure_date
+                route_return_date = return_date
             
             # Call real Amadeus API if we have the required parameters
             if origin and destination and departure_date and amadeus_service:
@@ -776,16 +1512,115 @@ async def chat(req: ChatRequest):
                     except ValueError:
                         logger.warning(f"[MAIN] ⚠️ Invalid departure date format: {departure_date}")
                     
-                    logger.info(f"[MAIN] Calling Amadeus API: {origin} -> {destination} on {departure_date}")
-                    logger.info(f"[MAIN] API Base URL: {amadeus_service.base_url}")
-                    amadeus_data = amadeus_service.search_flights(
-                        origin=origin,
-                        destination=destination,
-                        departure_date=departure_date,
-                        return_date=return_date,
-                        adults=adults,
-                        max_price=max_price
-                    )
+                    # Check if origin needs airport code conversion and find all airports
+                    origin_airports = []
+                    if not _is_iata_code(origin):
+                        logger.info(f"[MAIN] Converting origin '{origin}' to IATA code(s)")
+                        location_result = amadeus_service.get_airport_city_search(keyword=origin)
+                        if location_result and not location_result.get('error') and location_result.get('locations'):
+                            airports = [loc for loc in location_result['locations'] if loc.get('type') == 'AIRPORT']
+                            if airports:
+                                origin_airports = [a.get('code') for a in airports if a.get('code')]
+                                logger.info(f"[MAIN] Found {len(origin_airports)} airports for {origin}: {origin_airports}")
+                            else:
+                                # No airports found, use first location
+                                origin_airports = [location_result['locations'][0].get('code', origin)]
+                    else:
+                        origin_airports = [origin]
+                    
+                    # Check if destination needs airport code conversion and find all airports
+                    dest_airports = []
+                    if not _is_iata_code(destination):
+                        logger.info(f"[MAIN] Converting destination '{destination}' to IATA code(s)")
+                        location_result = amadeus_service.get_airport_city_search(keyword=destination)
+                        if location_result and not location_result.get('error') and location_result.get('locations'):
+                            airports = [loc for loc in location_result['locations'] if loc.get('type') == 'AIRPORT']
+                            if airports:
+                                dest_airports = [a.get('code') for a in airports if a.get('code')]
+                                logger.info(f"[MAIN] Found {len(dest_airports)} airports for {destination}: {dest_airports}")
+                            else:
+                                dest_airports = [location_result['locations'][0].get('code', destination)]
+                    else:
+                        dest_airports = [destination]
+                    
+                    # Search flights from all origin airports to all destination airports
+                    all_flights = []
+                    total_searches = len(origin_airports) * len(dest_airports)
+                    
+                    if total_searches > 1:
+                        logger.info(f"[MAIN] Searching {total_searches} airport combinations in parallel...")
+                        # Use ThreadPoolExecutor for parallel API calls
+                        with ThreadPoolExecutor(max_workers=min(6, total_searches)) as executor:
+                            future_to_route = {}
+                            for orig_airport in origin_airports:
+                                for dest_airport in dest_airports:
+                                    future = executor.submit(
+                                        amadeus_service.search_flights,
+                                        origin=orig_airport,
+                                        destination=dest_airport,
+                                        departure_date=departure_date,
+                                        return_date=return_date,
+                                        adults=adults,
+                                        max_price=max_price
+                                    )
+                                    future_to_route[future] = (orig_airport, dest_airport)
+                            
+                            for future in as_completed(future_to_route):
+                                orig_airport, dest_airport = future_to_route[future]
+                                try:
+                                    airport_flights = future.result()
+                                    if airport_flights and not airport_flights.get('error') and airport_flights.get('flights'):
+                                        # Add airport info to each flight for tracking
+                                        for flight in airport_flights['flights']:
+                                            flight['_origin_airport'] = orig_airport
+                                            flight['_destination_airport'] = dest_airport
+                                        all_flights.extend(airport_flights['flights'])
+                                        logger.info(f"[MAIN] Found {len(airport_flights['flights'])} flights from {orig_airport} to {dest_airport}")
+                                    else:
+                                        logger.info(f"[MAIN] No flights found from {orig_airport} to {dest_airport}")
+                                except Exception as e:
+                                    logger.error(f"[MAIN] Error searching {orig_airport} -> {dest_airport}: {e}")
+                        
+                        # Combine all results
+                        if all_flights:
+                            amadeus_data = {
+                                "flights": all_flights,
+                                "count": len(all_flights),
+                                "_multi_airport_search": True,
+                                "_origin_airports": origin_airports,
+                                "_destination_airports": dest_airports
+                            }
+                            # Use first airport codes for display
+                            origin = origin_airports[0]
+                            destination = dest_airports[0]
+                            logger.info(f"[MAIN] Combined results: {len(all_flights)} total flights from {len(origin_airports)} origin(s) to {len(dest_airports)} destination(s)")
+                        else:
+                            # Fallback to single search if no results
+                            logger.warning(f"[MAIN] No flights found from any airport combination, using first airports")
+                            origin = origin_airports[0]
+                            destination = dest_airports[0]
+                            amadeus_data = amadeus_service.search_flights(
+                                origin=origin,
+                                destination=destination,
+                                departure_date=departure_date,
+                                return_date=return_date,
+                                adults=adults,
+                                max_price=max_price
+                            )
+                    else:
+                        # Single airport search
+                        origin = origin_airports[0]
+                        destination = dest_airports[0]
+                        logger.info(f"[MAIN] Calling Amadeus API: {origin} -> {destination} on {departure_date}")
+                        amadeus_data = amadeus_service.search_flights(
+                            origin=origin,
+                            destination=destination,
+                            departure_date=departure_date,
+                            return_date=return_date,
+                            adults=adults,
+                            max_price=max_price
+                        )
+                    
                     logger.info(f"[MAIN] Amadeus API returned: {amadeus_data.get('count', 0) if amadeus_data else 0} flights")
                     
                     # Log whether we got real data or error
@@ -794,6 +1629,41 @@ async def chat(req: ChatRequest):
                         if amadeus_data.get('flights'):
                             first_flight = amadeus_data['flights'][0]
                             logger.info(f"[MAIN] First flight sample: Price={first_flight.get('price')}, Currency={first_flight.get('currency')}")
+                        
+                        # Convert flights format to outboundFlights/returnFlights format if needed
+                        if 'flights' in amadeus_data and 'outboundFlights' not in amadeus_data:
+                            logger.info("[MAIN] Converting flights format to outboundFlights/returnFlights format")
+                            from services.flight_formatter import format_flight_for_dashboard
+                            
+                            # Get city names for display
+                            origin_city = route_info_extracted.get('departure', origin) if route_info_extracted else origin
+                            destination_city = route_info_extracted.get('destination', destination) if route_info_extracted else destination
+                            
+                            # Get user preferences if available
+                            user_prefs = req.preferences if req.preferences else None
+                            if user_prefs:
+                                logger.info(f"[MAIN] Using user preferences for sorting: {user_prefs}")
+                            
+                            try:
+                                formatted_data = format_flight_for_dashboard(
+                                    flight_data=amadeus_data,
+                                    origin_city=origin_city,
+                                    dest_city=destination_city,
+                                    origin_code=origin,
+                                    dest_code=destination,
+                                    departure_date=departure_date,
+                                    return_date=return_date,
+                                    user_preferences=user_prefs
+                                )
+                                
+                                # Update amadeus_data with formatted data
+                                amadeus_data['outboundFlights'] = formatted_data.get('outboundFlights', [])
+                                amadeus_data['returnFlights'] = formatted_data.get('returnFlights', [])
+                                logger.info(f"[MAIN] Converted to {len(amadeus_data['outboundFlights'])} outbound and {len(amadeus_data.get('returnFlights', []))} return flights")
+                            except Exception as e:
+                                logger.error(f"[MAIN] Error converting flight data format: {e}")
+                                # Keep original format if conversion fails
+                        
                         # Mark that we have real data to prevent mock data generation
                         amadeus_data['_is_real_data'] = True
                     else:
@@ -803,7 +1673,13 @@ async def chat(req: ChatRequest):
                     amadeus_data = {"error": f"API call failed: {str(e)}"}
             else:
                 logger.warning("[MAIN] Missing required parameters for Amadeus API call")
-                amadeus_data = {"error": "Missing origin, destination, or departure date"}
+                # Provide specific error message based on what's missing
+                if not origin or not destination:
+                    amadeus_data = {"error": "Missing origin or destination. Please provide both origin and destination cities (e.g., 'flights from New York to Paris')."}
+                elif not departure_date:
+                    amadeus_data = {"error": "Missing departure date. Please provide a departure date (e.g., 'November 3rd' or '11/03/2024')."}
+                else:
+                    amadeus_data = {"error": "Missing required parameters. Please provide origin, destination, and departure date."}
         # If travel intent detected and has required parameters, fetch data
         elif intent["type"] != "general" and intent["has_required_params"] and intent["confidence"] > 0.5:
             logger.info(f"Detected {intent['type']} intent with confidence {intent['confidence']}")
@@ -823,36 +1699,128 @@ async def chat(req: ChatRequest):
                     # Call appropriate Amadeus API based on intent
                     if intent["type"] == "flight_search":
                         logger.info(f"Calling flight search with params: {intent['params']}")
-                        # If origin/destination are not IATA codes, try to get them via location search
-                        origin = intent["params"]["origin"]
-                        destination = intent["params"]["destination"]
                         
-                        # Check if we need to convert city names to IATA codes
-                        if not _is_iata_code(origin):
-                            logger.info(f"Converting origin '{origin}' to IATA code")
-                            location_result = amadeus_service.get_airport_city_search(keyword=origin)
-                            if location_result and not location_result.get('error') and location_result.get('locations'):
-                                # Use the first result's IATA code from normalized schema
-                                origin = location_result['locations'][0].get('code', origin)
-                                logger.info(f"Converted origin to IATA code: {origin}")
+                        # Validate required parameters before API call
+                        origin = intent["params"].get("origin", "")
+                        destination = intent["params"].get("destination", "")
+                        departure_date = intent["params"].get("departure_date", "")
                         
-                        if not _is_iata_code(destination):
-                            logger.info(f"Converting destination '{destination}' to IATA code")
-                            location_result = amadeus_service.get_airport_city_search(keyword=destination)
-                            if location_result and not location_result.get('error') and location_result.get('locations'):
-                                # Use the first result's IATA code from normalized schema
-                                destination = location_result['locations'][0].get('code', destination)
-                                logger.info(f"Converted destination to IATA code: {destination}")
-                        
-                        amadeus_data = amadeus_service.search_flights(
-                            origin=origin,
-                            destination=destination,
-                            departure_date=intent["params"]["departure_date"],
-                            return_date=intent["params"].get("return_date"),
-                            adults=intent["params"].get("adults", 1),
-                            max_price=intent["params"].get("max_price")
-                        )
-                        logger.info(f"Amadeus flight search returned count={(amadeus_data or {}).get('count')} for {origin}->{destination}")
+                        # Check for missing required parameters
+                        if not origin or not destination:
+                            logger.warning(f"Missing origin or destination: origin={origin}, destination={destination}")
+                            amadeus_data = {"error": "Missing origin or destination. Please provide both origin and destination cities (e.g., 'flights from New York to Paris')."}
+                        elif not departure_date:
+                            logger.warning(f"Missing departure date: departure_date={departure_date}")
+                            amadeus_data = {"error": "Missing departure date. Please provide a departure date (e.g., 'November 3rd' or '11/03/2024')."}
+                        else:
+                            # Check if origin needs airport code conversion and find all airports
+                            origin_airports = []
+                            if not _is_iata_code(origin):
+                                logger.info(f"Converting origin '{origin}' to IATA code(s)")
+                                location_result = amadeus_service.get_airport_city_search(keyword=origin)
+                                if location_result and not location_result.get('error') and location_result.get('locations'):
+                                    airports = [loc for loc in location_result['locations'] if loc.get('type') == 'AIRPORT']
+                                    if airports:
+                                        origin_airports = [a.get('code') for a in airports if a.get('code')]
+                                        logger.info(f"Found {len(origin_airports)} airports for {origin}: {origin_airports}")
+                                    else:
+                                        origin_airports = [location_result['locations'][0].get('code', origin)]
+                            else:
+                                origin_airports = [origin]
+                            
+                            # Check if destination needs airport code conversion and find all airports
+                            dest_airports = []
+                            if not _is_iata_code(destination):
+                                logger.info(f"Converting destination '{destination}' to IATA code(s)")
+                                location_result = amadeus_service.get_airport_city_search(keyword=destination)
+                                if location_result and not location_result.get('error') and location_result.get('locations'):
+                                    airports = [loc for loc in location_result['locations'] if loc.get('type') == 'AIRPORT']
+                                    if airports:
+                                        dest_airports = [a.get('code') for a in airports if a.get('code')]
+                                        logger.info(f"Found {len(dest_airports)} airports for {destination}: {dest_airports}")
+                                    else:
+                                        dest_airports = [location_result['locations'][0].get('code', destination)]
+                            else:
+                                dest_airports = [destination]
+                            
+                            # Search flights from all origin airports to all destination airports
+                            all_flights = []
+                            total_searches = len(origin_airports) * len(dest_airports)
+                            
+                            if total_searches > 1:
+                                logger.info(f"Searching {total_searches} airport combinations in parallel...")
+                                # Use ThreadPoolExecutor for parallel API calls
+                                with ThreadPoolExecutor(max_workers=min(6, total_searches)) as executor:
+                                    future_to_route = {}
+                                    for orig_airport in origin_airports:
+                                        for dest_airport in dest_airports:
+                                            future = executor.submit(
+                                                amadeus_service.search_flights,
+                                                origin=orig_airport,
+                                                destination=dest_airport,
+                                                departure_date=departure_date,
+                                                return_date=intent["params"].get("return_date"),
+                                                adults=intent["params"].get("adults", 1),
+                                                max_price=intent["params"].get("max_price")
+                                            )
+                                            future_to_route[future] = (orig_airport, dest_airport)
+                                    
+                                    for future in as_completed(future_to_route):
+                                        orig_airport, dest_airport = future_to_route[future]
+                                        try:
+                                            airport_flights = future.result()
+                                            if airport_flights and not airport_flights.get('error') and airport_flights.get('flights'):
+                                                # Add airport info to each flight for tracking
+                                                for flight in airport_flights['flights']:
+                                                    flight['_origin_airport'] = orig_airport
+                                                    flight['_destination_airport'] = dest_airport
+                                                all_flights.extend(airport_flights['flights'])
+                                                logger.info(f"Found {len(airport_flights['flights'])} flights from {orig_airport} to {dest_airport}")
+                                            else:
+                                                logger.info(f"No flights found from {orig_airport} to {dest_airport}")
+                                        except Exception as e:
+                                            logger.error(f"Error searching {orig_airport} -> {dest_airport}: {e}")
+                                
+                                # Combine all results
+                                if all_flights:
+                                    amadeus_data = {
+                                        "flights": all_flights,
+                                        "count": len(all_flights),
+                                        "_multi_airport_search": True,
+                                        "_origin_airports": origin_airports,
+                                        "_destination_airports": dest_airports
+                                    }
+                                    # Use first airport codes for display
+                                    origin = origin_airports[0]
+                                    destination = dest_airports[0]
+                                    logger.info(f"Combined results: {len(all_flights)} total flights from {len(origin_airports)} origin(s) to {len(dest_airports)} destination(s)")
+                                else:
+                                    # Fallback to single search if no results
+                                    logger.warning(f"No flights found from any airport combination, using first airports")
+                                    origin = origin_airports[0]
+                                    destination = dest_airports[0]
+                                    amadeus_data = amadeus_service.search_flights(
+                                        origin=origin,
+                                        destination=destination,
+                                        departure_date=departure_date,
+                                        return_date=intent["params"].get("return_date"),
+                                        adults=intent["params"].get("adults", 1),
+                                        max_price=intent["params"].get("max_price")
+                                    )
+                            else:
+                                # Single airport search
+                                origin = origin_airports[0]
+                                destination = dest_airports[0]
+                                amadeus_data = amadeus_service.search_flights(
+                                    origin=origin,
+                                    destination=destination,
+                                    departure_date=departure_date,
+                                    return_date=intent["params"].get("return_date"),
+                                    adults=intent["params"].get("adults", 1),
+                                    max_price=intent["params"].get("max_price")
+                                )
+                            
+                            logger.info(f"Amadeus flight search returned count={(amadeus_data or {}).get('count')} for {origin}->{destination}")
                     elif intent["type"] == "hotel_search":
                         logger.info(f"Calling hotel search with params: {intent['params']}")
                         amadeus_data = amadeus_service.search_hotels(
@@ -867,15 +1835,32 @@ async def chat(req: ChatRequest):
                     elif intent["type"] == "activity_search":
                         logger.info(f"Calling activity search with params: {intent['params']}")
                         if "latitude" in intent["params"] and "longitude" in intent["params"]:
+                            # Direct coordinate search
                             amadeus_data = amadeus_service.search_activities(
                                 latitude=float(intent["params"]["latitude"]),
                                 longitude=float(intent["params"]["longitude"]),
-                                radius=intent["params"].get("radius", 20)
+                                radius=intent["params"].get("radius", 1)
                             )
+                        elif "destination" in intent["params"]:
+                            # City-based search - convert city name to coordinates
+                            city_name = intent["params"]["destination"]
+                            logger.info(f"Converting city name '{city_name}' to coordinates")
+                            coordinates = amadeus_service.get_city_coordinates(city_name)
+                            
+                            if coordinates:
+                                lat, lon = coordinates
+                                logger.info(f"Found coordinates for {city_name}: {lat}, {lon}")
+                                amadeus_data = amadeus_service.search_activities(
+                                    latitude=lat,
+                                    longitude=lon,
+                                    radius=intent["params"].get("radius", 1)
+                                )
+                            else:
+                                logger.warning(f"Could not find coordinates for city: {city_name}")
+                                amadeus_data = {"error": f"Could not find location coordinates for {city_name}"}
                         else:
-                            # For city-based activity search, we'd need to get coordinates first
-                            logger.warning("Activity search requires coordinates")
-                            amadeus_data = {"error": "Activity search requires location coordinates"}
+                            logger.warning("Activity search requires coordinates or destination city")
+                            amadeus_data = {"error": "Activity search requires location coordinates or a destination city name"}
                     elif intent["type"] == "flight_inspiration":
                         logger.info(f"Calling flight inspiration with params: {intent['params']}")
                         amadeus_data = amadeus_service.get_flight_inspiration(
@@ -898,113 +1883,188 @@ async def chat(req: ChatRequest):
                         
                 except Exception as e:
                     logger.error(f"Amadeus API call failed: {e}")
-                    # Generate mock data as fallback for flight searches
-                    if intent["type"] == "flight_search":
-                        logger.warning(f"[MAIN] 🚨 GENERATING MOCK DATA due to API failure: {e}")
-                        route_info = {
-                            'departure': intent["params"].get("origin", "Washington"),
-                            'destination': intent["params"].get("destination", "Barcelona"),
-                            'departure_date': intent["params"].get("departure_date"),
-                            'return_date': intent["params"].get("return_date"),
-                            'departure_display': intent["params"].get("departure_display"),
-                            'return_display': intent["params"].get("return_display")
-                        }
-                        amadeus_data = generate_mock_flight_data(route_info, user_message)
-                        logger.warning(f"[MAIN] 🚨 MOCK DATA GENERATED - hasRealData=False")
-                    else:
-                        amadeus_data = {"error": f"API call failed: {str(e)}"}
+                    amadeus_data = {"error": f"API call failed: {str(e)}"}
                     
         # Add fallback for when no data is fetched but intent was detected
         elif intent["type"] != "general" and intent["confidence"] > 0.5:
             logger.warning(f"Intent detected but no API call made: {intent}")
-            # Only generate mock data if we truly have no data and it's a flight search
-            if intent["type"] == "flight_search" and not amadeus_data and not amadeus_data.get('_is_real_data'):
-                logger.warning(f"[MAIN] 🚨 GENERATING MOCK DATA for missing parameters")
-                route_info = {
-                    'departure': intent["params"].get("origin", "Washington"),
-                    'destination': intent["params"].get("destination", "Barcelona"),
-                    'departure_date': intent["params"].get("departure_date"),
-                    'return_date': intent["params"].get("return_date")
-                }
-                amadeus_data = generate_mock_flight_data(route_info, user_message)
-                logger.warning(f"[MAIN] 🚨 MOCK DATA GENERATED - hasRealData=False")
+            # Check for specific missing parameters to provide better error messages
+            params = intent.get("params", {})
+            
+            if intent["type"] == "flight_search":
+                origin = params.get("origin", "")
+                destination = params.get("destination", "")
+                departure_date = params.get("departure_date", "")
+                
+                if not origin or not destination:
+                    amadeus_data = {"error": "Missing origin or destination. Please provide both origin and destination cities (e.g., 'flights from New York to Paris')."}
+                elif not departure_date:
+                    amadeus_data = {"error": "Missing departure date. Please provide a departure date (e.g., 'November 3rd' or '11/03/2024')."}
+                else:
+                    amadeus_data = {"error": "Unable to fetch real-time flight data. Please try rephrasing your request with specific dates and locations."}
+            elif intent["type"] == "activity_search":
+                destination = params.get("destination", "")
+                latitude = params.get("latitude")
+                longitude = params.get("longitude")
+                
+                if not destination and not (latitude and longitude):
+                    amadeus_data = {"error": "Missing location. Please provide a city name (e.g., 'activities in Paris' or 'things to do in Barcelona') or coordinates."}
+                else:
+                    amadeus_data = {"error": "Unable to fetch activity data. Please try rephrasing your request with a specific city name."}
+            elif intent["type"] == "hotel_search":
+                destination = params.get("destination", "")
+                check_in = params.get("check_in", "")
+                check_out = params.get("check_out", "")
+                
+                if not destination:
+                    amadeus_data = {"error": "Missing destination. Please provide a city name (e.g., 'hotels in Paris')."}
+                elif not check_in or not check_out:
+                    amadeus_data = {"error": "Missing dates. Please provide check-in and check-out dates (e.g., 'hotels in Paris from December 1 to December 5')."}
+                else:
+                    amadeus_data = {"error": "Unable to fetch hotel data. Please try rephrasing your request with specific dates and location."}
             else:
-                amadeus_data = {"error": "Unable to fetch real-time data. Please try rephrasing your request with specific dates and locations."}
+                amadeus_data = {"error": "Unable to fetch real-time data. Please try rephrasing your request with more specific information."}
         
         # Generate response using OpenAI
-        try:
-            # Create system prompt with context and data
-            system_prompt = create_system_prompt(req.context, amadeus_data)
+        # If there's an error, return error message directly without calling GPT
+        if amadeus_data and amadeus_data.get('error'):
+            error_msg = amadeus_data.get('error', 'Unknown error')
             
-            response = client.chat.completions.create(
-                model="gpt-4o-mini",
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    *req.messages
-                ],
-                temperature=0.7,
-                max_tokens=1000
-            )
+            # Generate user-friendly error message based on intent type
+            intent_type = intent.get("type", "general")
             
-            reply = response.choices[0].message.content
-            logger.info(f"Generated reply: {reply[:100]}...")
-            
-            # Post-process the reply to format place names with bold and underlined text
-            reply = format_place_names(reply)
-            
-        except Exception as e:
-            logger.error(f"OpenAI API error: {e}")
-            if has_flight_keywords:
-                reply = "I found some great flight options for you! Check out the dashboard for detailed information, prices, and booking options."
+            if 'Missing' in error_msg or 'missing' in error_msg.lower():
+                if intent_type == "activity_search":
+                    if 'location' in error_msg.lower() or 'city' in error_msg.lower():
+                        reply = "I'd be happy to help you find activities! Please tell me which city you'd like to explore. For example:\n- 'What activities are available in Paris?'\n- 'Things to do in Barcelona'\n- 'Activities in Tokyo'"
+                    else:
+                        reply = f"I need more information to find activities for you. {error_msg.replace('Missing', '').replace('missing', '').strip()}"
+                elif intent_type == "hotel_search":
+                    if 'destination' in error_msg.lower():
+                        reply = "I'd be happy to help you find hotels! Please tell me which city you'd like to stay in. For example:\n- 'Hotels in Paris'\n- 'Accommodations in New York'"
+                    elif 'date' in error_msg.lower():
+                        reply = "I need check-in and check-out dates to search for hotels. For example:\n- 'Hotels in Paris from December 1 to December 5'\n- 'Hotels in New York from November 15 to November 20'"
+                    else:
+                        reply = f"I need more information to find hotels for you. {error_msg.replace('Missing', '').replace('missing', '').strip()}"
+                elif intent_type == "flight_search":
+                    if 'origin' in error_msg.lower() or 'destination' in error_msg.lower():
+                        reply = "I'd be happy to help you find flights! Please provide both your departure and destination cities. For example:\n- 'Flights from New York to Paris'\n- 'Flights from Los Angeles to Tokyo'"
+                    elif 'date' in error_msg.lower():
+                        reply = "I need a departure date to search for flights. For example:\n- 'Flights from New York to Paris on November 15th'\n- 'Flights from LA to Tokyo on December 1'"
+                    else:
+                        reply = f"I need more information to find flights for you. {error_msg.replace('Missing', '').replace('missing', '').strip()}"
+                else:
+                    reply = f"I need more information. {error_msg.replace('Missing', '').replace('missing', '').strip()}"
+            elif 'Invalid' in error_msg or 'invalid' in error_msg.lower():
+                if 'date' in error_msg.lower():
+                    reply = "Please provide dates in a valid format. For example:\n- 'November 15th, 2024'\n- '12/15/2024'\n- 'Dec 15'"
+                else:
+                    reply = f"Please check your input: {error_msg.replace('Invalid', '').replace('invalid', '').strip()}"
+            elif 'API call failed' in error_msg:
+                if intent_type == "activity_search":
+                    reply = "I'm having trouble connecting to the activities database right now. Please try again in a moment, or try asking about a different city."
+                elif intent_type == "hotel_search":
+                    reply = "I'm having trouble connecting to the hotel database right now. Please try again in a moment."
+                else:
+                    reply = "I'm having trouble connecting to the travel database right now. Please check your connection and try again."
+            elif 'Could not find location coordinates' in error_msg:
+                reply = "I couldn't find that location. Please try:\n- Using the full city name (e.g., 'Paris' instead of 'Par')\n- Specifying the city and country (e.g., 'Paris, France')\n- Asking about a different city"
+            elif 'No flights available' in error_msg:
+                reply = "I couldn't find any flights for that route and dates. Please try:\n- Different dates\n- Different destinations\n- A nearby airport"
             else:
-                reply = "I'm sorry, I'm having trouble processing your request right now. Please try again."
+                # Make error message more friendly and context-aware
+                if intent_type == "activity_search":
+                    reply = f"I couldn't find activities right now. {error_msg}. Please try asking about a specific city, like 'activities in Paris' or 'things to do in Barcelona'."
+                elif intent_type == "hotel_search":
+                    reply = f"I couldn't find hotels right now. {error_msg}. Please try asking with specific dates and a city name."
+                elif intent_type == "flight_search":
+                    reply = f"I couldn't find flights right now. {error_msg}. Please try rephrasing your request with specific dates and locations."
+                else:
+                    reply = f"I encountered an issue: {error_msg}. Please try rephrasing your request."
             
-        # Format flight data for dashboard if available
-        dashboard_data = None
-        if amadeus_data and not amadeus_data.get('error') and amadeus_data.get('flights'):
+            logger.info(f"Returning error message directly: {reply}")
+        else:
+            # No error, proceed with GPT call
             try:
-                # Get route information for formatter
-                origin_city = "Unknown"
-                dest_city = "Unknown"
-                origin_code = ""
-                dest_code = ""
-                departure_date = ""
-                return_date = None
-                
-                # Extract from intent params if available
-                if intent["type"] == "flight_search" and intent["has_required_params"]:
-                    origin_code = intent["params"].get("origin", "")
-                    dest_code = intent["params"].get("destination", "")
-                    departure_date = intent["params"].get("departure_date", "")
-                    return_date = intent["params"].get("return_date")
-                
-                # Get city names from codes
-                from services.iata_codes import get_airport_name
-                origin_city = get_airport_name(origin_code) if origin_code else "Unknown"
-                dest_city = get_airport_name(dest_code) if dest_code else "Unknown"
-                
-                # Format for dashboard
-                dashboard_data = format_flight_for_dashboard(
-                    flight_data=amadeus_data,
-                    origin_city=origin_city,
-                    dest_city=dest_city,
-                    origin_code=origin_code,
-                    dest_code=dest_code,
-                    departure_date=departure_date,
-                    return_date=return_date
+                # Create system prompt with context and data
+                system_prompt = create_system_prompt(
+                    req.context, 
+                    amadeus_data,
+                    origin=route_origin,
+                    destination=route_destination,
+                    departure_date=route_departure_date,
+                    return_date=route_return_date
                 )
-                logger.info("Successfully formatted flight data for dashboard")
+                
+                response = client.chat.completions.create(
+                    model="gpt-4o-mini",
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        *req.messages
+                    ],
+                    temperature=0.7,
+                    max_tokens=1000
+                )
+                
+                reply = response.choices[0].message.content
+                logger.info(f"Generated reply: {reply[:100]}...")
+                
+                # Post-process the reply to format place names with bold and underlined text
+                reply = format_place_names(reply)
             except Exception as e:
-                logger.error(f"Failed to format flight data for dashboard: {e}")
-                dashboard_data = None
-        
+                logger.error(f"OpenAI API error: {e}")
+                # If there's an error in amadeus_data, show that error message instead of generic fallback
+                if amadeus_data and amadeus_data.get('error'):
+                    error_msg = amadeus_data.get('error', 'Unknown error')
+                    # Generate user-friendly error message
+                    if 'Missing' in error_msg or 'missing' in error_msg.lower():
+                        if 'origin' in error_msg.lower() or 'destination' in error_msg.lower():
+                            reply = "**Error:** Please provide both origin and destination cities (e.g., 'flights from New York to Paris')."
+                        elif 'date' in error_msg.lower():
+                            reply = "**Error:** Please provide a departure date (e.g., 'November 3rd' or '11/03/2024')."
+                        else:
+                            reply = f"**Error:** {error_msg}"
+                    elif 'Invalid' in error_msg or 'invalid' in error_msg.lower():
+                        if 'date' in error_msg.lower():
+                            reply = "**Error:** Please provide dates in a valid format (e.g., 'November 3rd, 2024', '11/03/2024', or 'Nov 3')."
+                        else:
+                            reply = f"**Error:** {error_msg}"
+                    elif 'API call failed' in error_msg:
+                        reply = "**Error:** Unable to fetch flight data. Please check your connection and try again."
+                    elif 'No flights available' in error_msg:
+                        reply = "**Error:** No flights available for the specified route and dates. Please try different dates or destinations."
+                    else:
+                        reply = f"**Error:** {error_msg}"
+                elif has_flight_keywords and amadeus_data and not amadeus_data.get('error'):
+                    # If we have flight data but GPT failed, create a basic response with the data
+                    reply = "I found the following flight options for you:\n\n"
+                    if 'flights' in amadeus_data:
+                        for i, flight in enumerate(amadeus_data['flights'][:5], 1):
+                            price = flight.get('price', 'N/A')
+                            currency = flight.get('currency', 'USD')
+                            reply += f"{i}. Price: {price} {currency}\n"
+                    elif 'outboundFlights' in amadeus_data:
+                        for i, flight in enumerate(amadeus_data['outboundFlights'][:5], 1):
+                            airline = flight.get('airline', 'Unknown')
+                            flight_num = flight.get('flightNumber', 'N/A')
+                            price = flight.get('price', 'N/A')
+                            departure = flight.get('departure', 'N/A')
+                            arrival = flight.get('arrival', 'N/A')
+                            duration = flight.get('duration', 'N/A')
+                            reply += f"{i}. {airline} {flight_num} - ${price} | Departure: {departure} | Arrival: {arrival} | Duration: {duration}\n"
+                    else:
+                        reply = "I found some great flight options for you! However, I'm having trouble processing the details right now. Please try again."
+                elif has_flight_keywords:
+                    reply = "I'm having trouble fetching flight information right now. Please try again."
+                else:
+                    reply = "I'm sorry, I'm having trouble processing your request right now. Please try again."
+            
         return {
             "reply": reply,
             "session_id": session_id,
             "intent_detected": intent["type"],
             "data_fetched": amadeus_data is not None and not amadeus_data.get('error'),
-            "amadeus_data": amadeus_data if amadeus_data is not None else None,
-            "dashboard_data": dashboard_data
+            "amadeus_data": amadeus_data if amadeus_data is not None else None
         }
     except HTTPException:
         raise
@@ -1132,6 +2192,32 @@ def extract_route_from_message(message):
     """Extract route information from user message using dynamic parsing"""
     import re
     
+    # Helper function to normalize city names (remove dots, extra spaces, etc.)
+    def normalize_city_name(city_str):
+        """Normalize city name for matching"""
+        # Remove dots, extra spaces, and normalize
+        normalized = re.sub(r'[.\.,]+', '', city_str.lower().strip())
+        normalized = re.sub(r'\s+', ' ', normalized)  # Multiple spaces to single
+        return normalized
+    
+    # Helper function to find city in mappings
+    def find_city_in_mappings(city_str, mappings):
+        """Find city in mappings with fuzzy matching"""
+        normalized = normalize_city_name(city_str)
+        
+        # Direct match
+        if normalized in mappings:
+            return normalized
+        
+        # Try matching without common suffixes
+        for key in mappings.keys():
+            if normalized.startswith(key) or key in normalized:
+                # Check if it's a reasonable match (not too different)
+                if abs(len(normalized) - len(key)) <= 3:
+                    return key
+        
+        return None
+    
     # Common airport codes and city mappings
     airport_mappings = {
         'miami': 'MIA', 'dfw': 'DFW', 'dallas': 'DFW', 'fort worth': 'DFW',
@@ -1146,7 +2232,8 @@ def extract_route_from_message(message):
         'phoenix': 'PHX', 'phx': 'PHX',
         'las vegas': 'LAS', 'las': 'LAS',
         'orlando': 'MCO', 'mco': 'MCO',
-        'washington dc': 'IAD', 'washington': 'IAD', 'dc': 'IAD', 'dca': 'DCA',
+        'washington dc': 'IAD', 'washington d c': 'IAD', 'washington d.c.': 'IAD', 
+        'washington': 'IAD', 'dc': 'IAD', 'dca': 'DCA',
         'ohio': 'CMH', 'columbus': 'CMH', 'cleveland': 'CLE', 'cincinnati': 'CVG', 'cmh': 'CMH', 'cle': 'CLE', 'cvg': 'CVG',
         'houston': 'IAH', 'iah': 'IAH',
         'detroit': 'DTW', 'dtw': 'DTW',
@@ -1161,7 +2248,8 @@ def extract_route_from_message(message):
         'berlin': 'BER', 'ber': 'BER',
         'amsterdam': 'AMS', 'ams': 'AMS',
         'tokyo': 'NRT', 'nrt': 'NRT',
-        'mexico city': 'MEX', 'mex': 'MEX'
+        'mexico city': 'MEX', 'mex': 'MEX',
+        'istanbul': 'IST', 'ist': 'IST'
     }
     
     city_mappings = {
@@ -1177,7 +2265,8 @@ def extract_route_from_message(message):
         'phoenix': 'Phoenix', 'phx': 'Phoenix',
         'las vegas': 'Las Vegas', 'las': 'Las Vegas',
         'orlando': 'Orlando', 'mco': 'Orlando',
-        'washington dc': 'Washington DC', 'washington': 'Washington DC', 'dc': 'Washington DC', 'dca': 'Washington DC',
+        'washington dc': 'Washington DC', 'washington d c': 'Washington DC', 'washington d.c.': 'Washington DC',
+        'washington': 'Washington DC', 'dc': 'Washington DC', 'dca': 'Washington DC',
         'ohio': 'Ohio', 'columbus': 'Ohio', 'cleveland': 'Ohio', 'cincinnati': 'Ohio', 'cmh': 'Ohio', 'cle': 'Ohio', 'cvg': 'Ohio',
         'houston': 'Houston', 'iah': 'Houston',
         'detroit': 'Detroit', 'dtw': 'Detroit',
@@ -1192,66 +2281,85 @@ def extract_route_from_message(message):
         'berlin': 'Berlin', 'ber': 'Berlin',
         'amsterdam': 'Amsterdam', 'ams': 'Amsterdam',
         'tokyo': 'Tokyo', 'nrt': 'Tokyo',
-        'mexico city': 'Mexico City', 'mex': 'Mexico City'
+        'mexico city': 'Mexico City', 'mex': 'Mexico City',
+        'istanbul': 'Istanbul', 'ist': 'Istanbul'
     }
     
     message_lower = message.lower()
     logger.debug(f"Processing message: '{message_lower}'")
     
-    # Improved regex patterns to handle various formats
-    # Pattern 1: "flights to X to Y" format (highest priority)
-    flights_to_pattern = r'flights?\s+to\s+([a-z\s]+?)\s+to\s+([a-z\s]+?)(?:\s+(?:nov|dec|jan|feb|mar|apr|may|jun|jul|aug|sep|oct)[\s\-]*\d+|\s|$)'
-    match = re.search(flights_to_pattern, message_lower)
-    logger.debug(f"flights_to_pattern match: {match}")
+    origin_city = None
+    destination_city = None
     
-    if match:
-        origin_city = match.group(1).strip()
-        destination_city = match.group(2).strip()
-        logger.debug(f"flights_to matched - origin: '{origin_city}', destination: '{destination_city}'")
-    else:
-        # Pattern 2: "from X to Y" (more flexible with dates)
-        from_to_pattern = r'from\s+([a-z\s]+?)\s+to\s+([a-z\s]+?)(?:\s+(?:nov|dec|jan|feb|mar|apr|may|jun|jul|aug|sep|oct)[\s\-]*\d+|\s|$)'
-        match = re.search(from_to_pattern, message_lower)
-        logger.debug(f"from_to_pattern match: {match}")
-        
+    # Improved regex patterns to handle various formats (including dots and special characters)
+    # Pattern 1: "flights from X to Y" or "search flights from X to Y"
+    patterns = [
+        (r'(?:search|find|get|book)\s+flights?\s+from\s+([a-z\s.]+?)\s+to\s+([a-z\s.]+?)(?:\s+from|\s+on|\s+|$)', 'search flights from'),
+        (r'flights?\s+from\s+([a-z\s.]+?)\s+to\s+([a-z\s.]+?)(?:\s+from|\s+on|\s+|$)', 'flights from'),
+        (r'from\s+([a-z\s.]+?)\s+to\s+([a-z\s.]+?)(?:\s+from|\s+on|\s+(?:nov|dec|jan|feb|mar|apr|may|jun|jul|aug|sep|oct)|$)', 'from to'),
+        (r'flights?\s+to\s+([a-z\s.]+?)\s+to\s+([a-z\s.]+?)(?:\s+from|\s+on|\s+|$)', 'flights to to'),
+    ]
+    
+    for pattern, pattern_name in patterns:
+        match = re.search(pattern, message_lower)
         if match:
-            origin_city = match.group(1).strip()
-            destination_city = match.group(2).strip()
-            logger.debug(f"from_to matched - origin: '{origin_city}', destination: '{destination_city}'")
-        else:
-            # Pattern 3: "X to Y" but avoid matching "show me" patterns
-            to_pattern = r'(?:^|^[^a-z]*)([a-z\s]{2,}?)\s+to\s+([a-z\s]+?)(?:\s+(?:nov|dec|jan|feb|mar|apr|may|jun|jul|aug|sep|oct)[\s\-]*\d+|\s|$)'
-            match = re.search(to_pattern, message_lower)
-            logger.debug(f"to_pattern match: {match}")
-            if match:
-                origin_city = match.group(1).strip()
-                destination_city = match.group(2).strip()
-                # Skip if origin contains common phrases that shouldn't be cities
-                if not any(phrase in origin_city for phrase in ['show me', 'find me', 'get me', 'need', 'want', 'looking for', 'flights']):
-                    print(f"DEBUG: to matched - origin: '{origin_city}', destination: '{destination_city}'")
-                else:
-                    match = None
+            origin_city_raw = match.group(1).strip()
+            destination_city_raw = match.group(2).strip()
             
-            if not match:
-                # Pattern 4: Handle "to X to Y" format (like "to new york to barcelona")
-                to_to_pattern = r'to\s+([a-z\s]+?)\s+to\s+([a-z\s]+?)(?:\s+(?:nov|dec|jan|feb|mar|apr|may|jun|jul|aug|sep|oct)[\s\-]*\d+|\s|$)'
-                match = re.search(to_to_pattern, message_lower)
-                logger.debug(f"to_to_pattern match: {match}")
-                if match:
-                    origin_city = match.group(1).strip()
-                    destination_city = match.group(2).strip()
-                    print(f"DEBUG: to_to matched - origin: '{origin_city}', destination: '{destination_city}'")
-                else:
-                    # Default fallback
-                    origin_city = 'new york'
-                    destination_city = 'los angeles'
-                    print(f"DEBUG: Using fallback - origin: '{origin_city}', destination: '{destination_city}'")
+            # Normalize and find in mappings
+            origin_key = find_city_in_mappings(origin_city_raw, airport_mappings)
+            dest_key = find_city_in_mappings(destination_city_raw, airport_mappings)
+            
+            if origin_key and dest_key:
+                origin_city = origin_key
+                destination_city = dest_key
+                logger.info(f"Pattern '{pattern_name}' matched - origin: '{origin_city_raw}' -> '{origin_city}', destination: '{destination_city_raw}' -> '{destination_city}'")
+                break
+    
+    # If no pattern matched, try to find cities anywhere in the message
+    if not origin_city or not destination_city:
+        # Extract all potential city names from the message
+        found_cities = []
+        for key in airport_mappings.keys():
+            # Check if the key appears in the message (with word boundaries)
+            pattern = r'\b' + re.escape(key) + r'\b'
+            if re.search(pattern, message_lower):
+                found_cities.append(key)
+        
+        # Also try normalized search for cities with dots/spaces
+        normalized_msg = normalize_city_name(message_lower)
+        for key in airport_mappings.keys():
+            normalized_key = normalize_city_name(key)
+            if normalized_key in normalized_msg and key not in found_cities:
+                found_cities.append(key)
+        
+        if len(found_cities) >= 2:
+            origin_city = found_cities[0]
+            destination_city = found_cities[1]
+            logger.info(f"Found cities in message - origin: '{origin_city}', destination: '{destination_city}'")
+        elif len(found_cities) == 1:
+            # Only one city found, need to determine if it's origin or destination
+            # Try to extract from context (e.g., "from X" or "to X")
+            if re.search(r'from\s+', message_lower):
+                origin_city = found_cities[0]
+            elif re.search(r'to\s+', message_lower):
+                destination_city = found_cities[0]
+    
+    # If still no cities found, return None values instead of fallback
+    if not origin_city or not destination_city:
+        logger.warning(f"Could not extract route from message: '{message}'")
+        return {
+            'departure': None,
+            'destination': None,
+            'departureCode': None,
+            'destinationCode': None
+        }
     
     # Map cities to airport codes and proper names
-    origin_code = airport_mappings.get(origin_city.lower(), 'JFK')
-    destination_code = airport_mappings.get(destination_city.lower(), 'CMH')
-    origin_name = city_mappings.get(origin_city.lower(), ' '.join(word.capitalize() for word in origin_city.split()))
-    destination_name = city_mappings.get(destination_city.lower(), ' '.join(word.capitalize() for word in destination_city.split()))
+    origin_code = airport_mappings.get(origin_city, 'JFK')
+    destination_code = airport_mappings.get(destination_city, 'BCN')
+    origin_name = city_mappings.get(origin_city, ' '.join(word.capitalize() for word in origin_city.split()))
+    destination_name = city_mappings.get(destination_city, ' '.join(word.capitalize() for word in destination_city.split()))
     
     return {
         'departure': origin_name,

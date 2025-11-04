@@ -96,9 +96,14 @@ Intent types:
 Required parameters by type:
 - flight_search: origin, destination, departure_date
 - hotel_search: destination (as city), check_in, check_out  
-- activity_search: latitude, longitude (or destination for city lookup)
+- activity_search: latitude, longitude (OR destination city name - will be converted to coordinates)
 - flight_inspiration: origin
 - location_search: keyword
+
+IMPORTANT for activity_search:
+- If user provides a city name (e.g., "activities in Paris", "things to do in Barcelona"), use "destination" parameter
+- If user provides coordinates, use "latitude" and "longitude" parameters
+- Both are valid - the system will handle city name to coordinate conversion automatically
 
 SPECIAL PARSING RULES:
 - For "flights to X to Y" format: X is the origin, Y is the destination
@@ -236,14 +241,9 @@ Return only the JSON object, no other text."""
                     params[date_field] = parsed_date
                     logger.debug(f"Parsed {date_field}: '{params[date_field]}' -> '{parsed_date}'")
         
-        # Add default dates if missing for flight searches
+        # Validate dates for flight searches (but don't add default dates - user must provide them)
         if intent_data["type"] == "flight_search":
-            if "departure_date" not in params:
-                # Default to 30 days from now
-                default_date = (datetime.now() + timedelta(days=30)).strftime("%Y-%m-%d")
-                params["departure_date"] = default_date
-                logger.debug(f"Added default departure_date: {default_date}")
-            else:
+            if "departure_date" in params:
                 # Validate that the parsed date is not in the past
                 try:
                     parsed_date = datetime.strptime(params["departure_date"], "%Y-%m-%d")
@@ -254,9 +254,9 @@ Return only the JSON object, no other text."""
                         logger.debug(f"Date was in the past, moved to next year: {params['departure_date']}")
                 except ValueError:
                     logger.warning(f"Invalid date format: {params['departure_date']}")
-                    # Fallback to default
-                    default_date = (datetime.now() + timedelta(days=30)).strftime("%Y-%m-%d")
-                    params["departure_date"] = default_date
+                    # Remove invalid date so user gets error message
+                    del params["departure_date"]
+                    logger.debug("Removed invalid departure_date - user must provide valid date")
             
             # Also validate return date if present
             if "return_date" in params:
