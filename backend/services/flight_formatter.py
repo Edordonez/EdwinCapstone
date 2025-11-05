@@ -60,6 +60,8 @@ def format_flight_for_dashboard(
         for flight in flight_data["flights"]:
             try:
                 price = float(flight.get("price", 0))
+                original_currency = flight.get("currency", "UNKNOWN")
+                logger.info(f"[FLIGHT_FORMATTER] CURRENCY CHECK: Original currency from Amadeus: {original_currency}, Price: {price}")
                 all_prices.append(price)
                 
                 # Process itineraries
@@ -188,11 +190,30 @@ def _format_single_flight(
     first_segment = segments[0]
     last_segment = segments[-1]
     
-    # Get airline info - check both possible field names
-    airline_code = first_segment.get("airline", first_segment.get("carrierCode", ""))
+    # Get airline codes from all segments
+    airline_codes = []
+    for segment in segments:
+        airline_code = segment.get("airline", segment.get("carrierCode", ""))
+        if airline_code:
+            airline_codes.append(airline_code)
+    
+    # Determine airline name: if all segments have same airline, use that; otherwise "Multiple Airlines"
+    if len(set(airline_codes)) == 1 and airline_codes:
+        # All segments have the same airline
+        airline_code = airline_codes[0]
+        airline_name = _get_airline_name(airline_code)
+    elif len(airline_codes) > 1:
+        # Different airlines in different segments
+        airline_name = "Multiple Airlines"
+        airline_code = airline_codes[0]  # Use first for flight number display
+    else:
+        # No airline code found
+        airline_code = airline_codes[0] if airline_codes else ""
+        airline_name = _get_airline_name(airline_code) if airline_code else "Unknown"
+    
     flight_number = first_segment.get("flight_number", first_segment.get("number", ""))
     
-    logger.info(f"[FLIGHT_FORMATTER] Processing flight: {airline_code} {flight_number}")
+    logger.info(f"[FLIGHT_FORMATTER] Processing flight: {airline_code} {flight_number}, segments: {len(segments)}, airlines: {airline_codes}")
     
     # Parse departure and arrival times
     dep_time_str = first_segment.get("departure", {}).get("time", "")
@@ -212,21 +233,25 @@ def _format_single_flight(
     else:
         flight_number_display = "Unknown"
     
+    # Get original currency from flight offer (preserve EUR from Amadeus)
+    original_currency = flight_offer.get("currency", "EUR")
+    logger.info(f"[FLIGHT_FORMATTER] CURRENCY CHECK: Flight {flight_number_display} - Currency: {original_currency}, Price: {price}")
+    
     result = {
         "id": f"{flight_offer.get('id', '')}_{itinerary_index}",
-        "airline": _get_airline_name(airline_code),
+        "airline": airline_name,
         "flightNumber": flight_number_display,
         "departure": dep_display,
         "arrival": arr_display,
         "duration": duration,
         "price": price,
-        "currency": "USD",  # Always display in USD
+        "currency": original_currency,  # Use original currency from Amadeus (EUR)
         "stops": len(segments) - 1,
         "segments": segments,  # Include segments for layover information
         "isOptimal": False,  # Will be set later
         "departureAirport": first_segment.get("departure", {}).get("iataCode", ""),
         "arrivalAirport": last_segment.get("arrival", {}).get("iataCode", ""),
-        "bookingLink": _generate_booking_link(_get_airline_name(airline_code), flight_number_display.replace(' ', ''))
+        "bookingLink": _generate_booking_link(airline_name, flight_number_display.replace(' ', ''))
     }
     
     # Preserve airport metadata from multi-airport search if available
@@ -234,6 +259,23 @@ def _format_single_flight(
         result['_origin_airport'] = flight_offer['_origin_airport']
     if '_destination_airport' in flight_offer:
         result['_destination_airport'] = flight_offer['_destination_airport']
+    
+    # Validate that we have minimum required fields
+    if not result.get('airline') or result.get('airline') == 'Unknown':
+        logger.warning(f"[FLIGHT_FORMATTER] Invalid flight: missing airline")
+        return None
+    if not result.get('flightNumber') or result.get('flightNumber') == 'Unknown':
+        logger.warning(f"[FLIGHT_FORMATTER] Invalid flight: missing flight number")
+        return None
+    if not result.get('departure') or result.get('departure') == 'N/A':
+        logger.warning(f"[FLIGHT_FORMATTER] Invalid flight: missing departure time")
+        return None
+    if not result.get('arrival') or result.get('arrival') == 'N/A':
+        logger.warning(f"[FLIGHT_FORMATTER] Invalid flight: missing arrival time")
+        return None
+    if price <= 0:
+        logger.warning(f"[FLIGHT_FORMATTER] Invalid flight: invalid price {price}")
+        return None
     
     logger.info(f"[FLIGHT_FORMATTER] Formatted flight: {result['airline']} {result['flightNumber']} - {dep_display} to {arr_display}")
     logger.info(f"[FLIGHT_FORMATTER] Flight details: Price=${price}, Stops={result['stops']}, DepartureAirport={result['departureAirport']}, ArrivalAirport={result['arrivalAirport']}")

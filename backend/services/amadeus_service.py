@@ -440,12 +440,16 @@ class AmadeusService:
         
         flights = []
         for i, offer in enumerate(response.get("data", [])):
-            logger.info(f"[AMADEUS] Processing offer {i+1}: ID={offer.get('id')}, Price={offer.get('price', {}).get('total')}")
+            price_obj = offer.get('price', {})
+            price_total = price_obj.get('total')
+            price_currency = price_obj.get('currency')
+            logger.info(f"[AMADEUS] Processing offer {i+1}: ID={offer.get('id')}, Price={price_total} {price_currency}")
+            logger.info(f"[AMADEUS] CURRENCY CHECK: Offer {i+1} - Original currency from API: {price_currency}")
             
             flight_info = {
                 "id": offer.get("id"),
-                "price": offer.get("price", {}).get("total"),
-                "currency": offer.get("price", {}).get("currency"),
+                "price": price_total,
+                "currency": price_currency,
                 "itineraries": []
             }
             
@@ -481,7 +485,13 @@ class AmadeusService:
                 })
             
             flights.append(flight_info)
-            logger.info(f"[AMADEUS] Formatted flight {i+1}: Price={flight_info['price']}, Itineraries={len(flight_info['itineraries'])}")
+            logger.info(f"[AMADEUS] Formatted flight {i+1}: Price={flight_info['price']} {flight_info['currency']}, Itineraries={len(flight_info['itineraries'])}")
+        
+        # Log currency summary
+        currencies = [f.get('currency') for f in flights if f.get('currency')]
+        if currencies:
+            unique_currencies = list(set(currencies))
+            logger.info(f"[AMADEUS] CURRENCY SUMMARY: Found {len(unique_currencies)} unique currency(ies): {unique_currencies}")
         
         result = {"flights": flights, "count": len(flights)}
         logger.info(f"[AMADEUS] Final formatted result: {len(flights)} flights")

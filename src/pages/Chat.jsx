@@ -127,7 +127,7 @@ async function sendToApi(messages, context, sessionId, preferences = null) {
   return res.json();
 }
 
-export default function Chat() {
+export default function Chat({ pendingMessage, onPendingMessageSent, onShowDashboard, showDashboard, dashboardData, onHideDashboard }) {
   const [messages, setMessages] = useState([]);
   const [isTyping, setIsTyping] = useState(false);
   const [error, setError] = useState(null);
@@ -137,6 +137,7 @@ export default function Chat() {
   const [onboardingComplete, setOnboardingComplete] = useState(false);
   const [userPreferences, setUserPreferences] = useState(null);
   const scrollRef = useRef(null);
+  const pendingMessageSentRef = useRef(false);
 
   const quickReplies = ['Plan a trip to Paris', 'Budget accommodations', 'Check weather'];
 
@@ -193,6 +194,24 @@ export default function Chat() {
       scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
     }
   }, [messages, isTyping]);
+
+  // Handle pending message from Generate Itinerary / Save Trip button
+  useEffect(() => {
+    if (pendingMessage && !pendingMessageSentRef.current && onboardingComplete && !isTyping && messages.length > 0) {
+      pendingMessageSentRef.current = true;
+      // Small delay to ensure UI is ready
+      const timer = setTimeout(() => {
+        handleSend(pendingMessage);
+        if (onPendingMessageSent) {
+          onPendingMessageSent();
+        }
+        pendingMessageSentRef.current = false;
+      }, 300);
+      
+      return () => clearTimeout(timer);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pendingMessage, onboardingComplete, isTyping, messages.length]);
 
   // Function to extract dates from user message
   const extractDatesFromMessage = (message) => {
@@ -478,8 +497,102 @@ export default function Chat() {
         }
   };
 
+  // Extract destination and dates from message content
+  const extractTripInfo = (messageContent) => {
+    let destination = null;
+    let departureDate = null;
+    let returnDate = null;
+    
+    // Try to extract destination from various patterns
+    // Pattern 1: "Flights from X to Y"
+    const fromToPattern = /Flights?\s+from\s+[^to]+\s+to\s+([A-Z][a-zA-Z\s]+)/i;
+    const fromToMatch = messageContent.match(fromToPattern);
+    if (fromToMatch) {
+      destination = fromToMatch[1].trim();
+    }
+    
+    // Pattern 2: "from X to Y" (without "Flights" prefix)
+    const simpleFromToPattern = /from\s+[^to]+\s+to\s+([A-Z][a-zA-Z\s]+)/i;
+    const simpleMatch = messageContent.match(simpleFromToPattern);
+    if (simpleMatch && !destination) {
+      destination = simpleMatch[1].trim();
+    }
+    
+    // Pattern 3: Just look for city names after "to"
+    const toPattern = /\s+to\s+([A-Z][a-zA-Z\s]+?)(?:\s|$|,|\.|\n)/i;
+    const toMatch = messageContent.match(toPattern);
+    if (toMatch && !destination) {
+      destination = toMatch[1].trim();
+    }
+    
+    // Extract dates
+    const monthNames = ['january', 'february', 'march', 'april', 'may', 'june', 
+                       'july', 'august', 'september', 'october', 'november', 'december'];
+    const monthAbbrevs = ['jan', 'feb', 'mar', 'apr', 'may', 'jun',
+                         'jul', 'aug', 'sep', 'oct', 'nov', 'dec'];
+    
+    // Look for date patterns
+    const datePatterns = [
+      /(january|february|march|april|may|june|july|august|september|october|november|december)\s+(\d{1,2})/gi,
+      /(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\s+(\d{1,2})/gi,
+      /(\d{1,2})\s+(january|february|march|april|may|june|july|august|september|october|november|december)/gi,
+      /(\d{1,2})\s+(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)/gi,
+      /(\d{1,2}\/\d{1,2}\/\d{4})/g,
+      /(\d{4}-\d{2}-\d{2})/g
+    ];
+    
+    const dateMatches = [];
+    datePatterns.forEach(pattern => {
+      const matches = messageContent.match(pattern);
+      if (matches) {
+        dateMatches.push(...matches);
+      }
+    });
+    
+    if (dateMatches.length > 0) {
+      departureDate = dateMatches[0];
+      if (dateMatches.length > 1) {
+        returnDate = dateMatches[1];
+      }
+    }
+    
+    return { destination, departureDate, returnDate };
+  };
+
+  // Handle Generate Itinerary button click
+  const handleGenerateItinerary = (messageContent) => {
+    const tripInfo = extractTripInfo(messageContent);
+    const destination = tripInfo.destination || 'your destination';
+    const dates = tripInfo.departureDate ? ` for ${tripInfo.departureDate}` : '';
+    if (tripInfo.returnDate) {
+      dates += ` to ${tripInfo.returnDate}`;
+    }
+    const message = `Would you like me to find hotels in ${destination}${dates}?`;
+    handleSend(message);
+  };
+
+  // Handle Save Trip button click
+  const handleSaveTrip = (messageContent) => {
+    const tripInfo = extractTripInfo(messageContent);
+    const destination = tripInfo.destination || 'your destination';
+    const dates = tripInfo.departureDate ? ` for ${tripInfo.departureDate}` : '';
+    if (tripInfo.returnDate) {
+      dates += ` to ${tripInfo.returnDate}`;
+    }
+    const message = `Would you like me to find hotels and activities in ${destination}${dates}?`;
+    handleSend(message);
+  };
+
   const rendered = useMemo(() => messages.map((m, idx) => (
-    <MessageBubble key={idx} role={m.role} content={m.content} timestamp={m.timestamp} />
+    <MessageBubble 
+      key={idx} 
+      role={m.role} 
+      content={m.content} 
+      timestamp={m.timestamp}
+      onGenerateItinerary={m.role === 'assistant' ? (messageContent) => handleGenerateItinerary(messageContent) : null}
+      onSaveTrip={m.role === 'assistant' ? (messageContent) => handleSaveTrip(messageContent) : null}
+    />
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   )), [messages]);
 
   // Show onboarding form if not completed

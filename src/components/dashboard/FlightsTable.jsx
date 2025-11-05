@@ -11,7 +11,22 @@ import {
 } from '../ui/table';
 
 export function FlightsTable({ flights }) {
+  // Filter out invalid or empty flights
+  const validFlights = (flights || []).filter(flight => {
+    return flight && 
+           flight.id && 
+           flight.airline && 
+           flight.flightNumber && 
+           flight.price !== undefined && 
+           flight.price !== null;
+  });
+  
+  if (validFlights.length === 0) {
+    return null;
+  }
+  
   return (
+    <>
     <Card>
       <CardHeader>
         <CardTitle>Available Flights</CardTitle>
@@ -34,7 +49,7 @@ export function FlightsTable({ flights }) {
             </TableRow>
           </TableHeader>
           <TableBody>
-            {flights.map((flight) => (
+            {validFlights.map((flight) => (
               <TableRow
                 key={flight.id}
                 className={flight.isOptimal ? 'bg-accent/50' : ''}
@@ -44,15 +59,15 @@ export function FlightsTable({ flights }) {
                     <svg className="w-4 h-4 text-muted-foreground" fill="currentColor" viewBox="0 0 24 24">
                       <path d="M21 16v-2l-8-5V3.5c0-.83-.67-1.5-1.5-1.5S10 2.67 10 3.5V9l-8 5v2l8-2.5V19l-2 1.5V22l3.5-1 3.5 1v-1.5L13 19v-5.5l8 2.5z"/>
                     </svg>
-                    {flight.airline}
+                    {flight.airline || 'N/A'}
                   </div>
                 </TableCell>
                 <TableCell>
-                  <span className="font-mono text-sm">{flight.flightNumber}</span>
+                  <span className="font-mono text-sm">{flight.flightNumber || 'N/A'}</span>
                 </TableCell>
-                <TableCell>{flight.departure}</TableCell>
-                <TableCell>{flight.arrival}</TableCell>
-                <TableCell>{flight.duration}</TableCell>
+                <TableCell>{flight.departure || 'N/A'}</TableCell>
+                <TableCell>{flight.arrival || 'N/A'}</TableCell>
+                <TableCell>{flight.duration || 'N/A'}</TableCell>
                 <TableCell>
                   {flight.stops === 0 ? (
                     <Badge variant="secondary">Non-stop</Badge>
@@ -63,7 +78,7 @@ export function FlightsTable({ flights }) {
                 <TableCell className="text-right">
                   <div className="flex items-center justify-end gap-2">
                     <span className={flight.isOptimal ? 'font-medium' : ''}>
-                      ${flight.price}
+                      {flight.currency === 'EUR' ? '€' : flight.currency === 'USD' ? '$' : flight.currency || '$'}{flight.price.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                     </span>
                     {flight.isOptimal && (
                       <Badge variant="default" style={{backgroundColor: 'var(--chart-2)', color: 'white'}}>
@@ -78,6 +93,7 @@ export function FlightsTable({ flights }) {
                     target="_blank"
                     rel="noopener noreferrer"
                     className="inline-flex items-center px-3 py-1 text-xs font-medium text-blue-600 bg-blue-50 rounded-md hover:bg-blue-100 transition-colors"
+                    onClick={(e) => e.stopPropagation()}
                   >
                     Book Now
                   </a>
@@ -88,5 +104,6 @@ export function FlightsTable({ flights }) {
         </Table>
       </CardContent>
     </Card>
+    </>
   );
 }

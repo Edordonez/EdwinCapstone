@@ -112,7 +112,10 @@ export function FlightDashboard({ searchData = null }) {
     errorMessage,
     priceDataLength: displayPriceData.length,
     flightsDataLength: displayFlightsData.length,
-    routeInfo
+    routeInfo,
+    outboundFlights: searchData?.outboundFlights?.length,
+    returnFlights: searchData?.returnFlights?.length,
+    hasFlights: displayFlightsData.length > 0 || (searchData?.outboundFlights && searchData.outboundFlights.length > 0) || (searchData?.returnFlights && searchData.returnFlights.length > 0)
   });
 
   // Format error message to be more user-friendly
@@ -210,6 +213,144 @@ export function FlightDashboard({ searchData = null }) {
          (!searchData?.returnFlights || searchData.returnFlights.length === 0) && (
           <FlightsTable key={`flights-table-${displayFlightsData[0]?.id}-${displayFlightsData[0]?.price}`} flights={displayFlightsData} />
         )}
+
+        {/* Generate Itinerary / Save Trip Button */}
+        <div style={{ 
+          display: 'flex', 
+          flexDirection: 'row', 
+          gap: '12px', 
+          marginTop: '24px', 
+          paddingTop: '24px', 
+          borderTop: '1px solid #e2e8f0',
+          flexWrap: 'wrap'
+        }}>
+            <button
+              onClick={() => {
+                if (searchData?.onGenerateItinerary) {
+                  searchData.onGenerateItinerary({
+                    destination: routeInfo.destination || routeInfo.destinationCode,
+                    destinationCode: routeInfo.destinationCode,
+                    departureDate: routeInfo.date || routeInfo.departure_display,
+                    returnDate: routeInfo.return_display,
+                  });
+                }
+              }}
+              className="inline-flex items-center justify-center px-6 py-3 bg-[#00ADEF] text-white font-semibold rounded-lg hover:bg-[#006AAF] transition-colors shadow-md hover:shadow-lg"
+              style={{
+                backgroundColor: '#00ADEF',
+                color: 'white',
+                fontWeight: '600',
+                padding: '12px 24px',
+                borderRadius: '8px',
+                border: 'none',
+                cursor: 'pointer',
+                transition: 'all 0.2s ease',
+                boxShadow: '0 2px 4px rgba(0, 173, 239, 0.3)',
+              }}
+              onMouseEnter={(e) => {
+                e.target.style.backgroundColor = '#006AAF';
+                e.target.style.transform = 'translateY(-1px)';
+                e.target.style.boxShadow = '0 4px 8px rgba(0, 173, 239, 0.4)';
+              }}
+              onMouseLeave={(e) => {
+                e.target.style.backgroundColor = '#00ADEF';
+                e.target.style.transform = 'translateY(0)';
+                e.target.style.boxShadow = '0 2px 4px rgba(0, 173, 239, 0.3)';
+              }}
+            >
+              <svg 
+                width="20" 
+                height="20" 
+                viewBox="0 0 20 20" 
+                fill="none" 
+                style={{ marginRight: '8px' }}
+              >
+                <path 
+                  d="M10 2L3 7V17C3 17.5304 3.21071 18.0391 3.58579 18.4142C3.96086 18.7893 4.46957 19 5 19H15C15.5304 19 16.0391 18.7893 16.4142 18.4142C16.7893 18.0391 17 17.5304 17 17V7L10 2Z" 
+                  stroke="currentColor" 
+                  strokeWidth="2" 
+                  strokeLinecap="round" 
+                  strokeLinejoin="round"
+                  fill="none"
+                />
+                <path 
+                  d="M10 10V19" 
+                  stroke="currentColor" 
+                  strokeWidth="2" 
+                  strokeLinecap="round" 
+                  strokeLinejoin="round"
+                />
+                <path 
+                  d="M3 7L10 12L17 7" 
+                  stroke="currentColor" 
+                  strokeWidth="2" 
+                  strokeLinecap="round" 
+                  strokeLinejoin="round"
+                />
+              </svg>
+              Generate Itinerary
+            </button>
+            <button
+              onClick={() => {
+                if (searchData?.onSaveTrip) {
+                  searchData.onSaveTrip({
+                    destination: routeInfo.destination || routeInfo.destinationCode,
+                    destinationCode: routeInfo.destinationCode,
+                    departureDate: routeInfo.date || routeInfo.departure_display,
+                    returnDate: routeInfo.return_display,
+                  });
+                }
+              }}
+              className="inline-flex items-center justify-center px-6 py-3 bg-white text-[#00ADEF] font-semibold rounded-lg border-2 border-[#00ADEF] hover:bg-[#E6F7FF] transition-colors"
+              style={{
+                backgroundColor: 'white',
+                color: '#00ADEF',
+                fontWeight: '600',
+                padding: '12px 24px',
+                borderRadius: '8px',
+                border: '2px solid #00ADEF',
+                cursor: 'pointer',
+                transition: 'all 0.2s ease',
+              }}
+              onMouseEnter={(e) => {
+                e.target.style.backgroundColor = '#E6F7FF';
+              }}
+              onMouseLeave={(e) => {
+                e.target.style.backgroundColor = 'white';
+              }}
+            >
+              <svg 
+                width="20" 
+                height="20" 
+                viewBox="0 0 20 20" 
+                fill="none" 
+                style={{ marginRight: '8px' }}
+              >
+                <path 
+                  d="M17.5 2.5L9.16667 10.8333L2.5 4.16667" 
+                  stroke="currentColor" 
+                  strokeWidth="2" 
+                  strokeLinecap="round" 
+                  strokeLinejoin="round"
+                />
+                <path 
+                  d="M15 2.5H17.5V5" 
+                  stroke="currentColor" 
+                  strokeWidth="2" 
+                  strokeLinecap="round" 
+                  strokeLinejoin="round"
+                />
+                <path 
+                  d="M17.5 2.5V7.5C17.5 8.03043 17.2893 8.53914 16.9142 8.91421C16.5391 9.28929 16.0304 9.5 15.5 9.5H4.5C3.96957 9.5 3.46086 9.28929 3.08579 8.91421C2.71071 8.53914 2.5 8.03043 2.5 7.5V4.5C2.5 3.96957 2.71071 3.46086 3.08579 3.08579C3.46086 2.71071 3.96957 2.5 4.5 2.5H7.5" 
+                  stroke="currentColor" 
+                  strokeWidth="2" 
+                  strokeLinecap="round" 
+                  strokeLinejoin="round"
+                />
+              </svg>
+              Save Trip
+            </button>
+        </div>
       </div>
     </ScrollArea>
   );

@@ -8,13 +8,12 @@ export function PriceChart({ data }) {
       <CardHeader>
         <CardTitle>Price Trends & Optimization</CardTitle>
         <CardDescription>
-          Compare current prices with optimal price points over time
+          Current prices and optimal price points over time
         </CardDescription>
       </CardHeader>
       <CardContent>
         <ResponsiveContainer width="100%" height={300}>
           <LineChart data={data}>
-            <CartesianGrid strokeDasharray="3 3" className="stroke-muted" />
             <XAxis
               dataKey="date"
               className="text-xs"
