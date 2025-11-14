@@ -1000,27 +1000,38 @@ function renderTable(rows, tableIndex = 0, onGenerateItinerary = null, onSaveTri
     const monthAbbrevs = ['jan', 'feb', 'mar', 'apr', 'may', 'jun',
                          'jul', 'aug', 'sep', 'oct', 'nov', 'dec'];
     
-    // Try to extract date from table's Departure column first (for Return Flights)
-    if (isReturnFlightsTable && rows.length > 1) {
+    // Try to extract date from table's Departure column first
+    if (rows.length > 1) {
       const departureColIndex = getColumnIndex(['departure']);
       if (departureColIndex >= 0 && rows[1] && rows[1][departureColIndex]) {
         const departureCell = rows[1][departureColIndex].toString();
         // Extract date from departure cell (e.g., "27 Nov 2025, 10:30" -> "27 Nov 2025")
         const dateMatch = departureCell.match(/(\d{1,2}\s+(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\s+\d{4})/i);
         if (dateMatch) {
-          returnDate = dateMatch[1];
+          const extractedDate = dateMatch[1];
+          if (isReturnFlightsTable) {
+            returnDate = extractedDate;
+          } else {
+            departureDate = extractedDate;
+          }
         } else {
           // Try other date patterns
           datePatterns.forEach(pattern => {
             const matches = departureCell.match(pattern);
             if (matches && matches.length > 0) {
-              returnDate = matches[0];
+              const extractedDate = matches[0];
+              if (isReturnFlightsTable) {
+                if (!returnDate) returnDate = extractedDate;
+              } else {
+                if (!departureDate) departureDate = extractedDate;
+              }
             }
           });
         }
       }
     }
     
+    // Extract all dates from message
     const dateMatches = [];
     datePatterns.forEach(pattern => {
       const matches = messageContent.match(pattern);
@@ -1031,18 +1042,62 @@ function renderTable(rows, tableIndex = 0, onGenerateItinerary = null, onSaveTri
     
     if (dateMatches.length > 0) {
       if (isReturnFlightsTable) {
-        // For Return Flights, use the second date (return date) if available
-        if (dateMatches.length > 1) {
-          returnDate = returnDate || dateMatches[1];
-        } else if (!returnDate) {
-          returnDate = dateMatches[0]; // Fallback to first date if only one found
+        // For Return Flights, ONLY find date in the "Return Flights" section
+        // Do NOT use dates from Outbound Flights section
+        const returnFlightsIndex = messageContent.toLowerCase().indexOf('return flights');
+        if (returnFlightsIndex >= 0) {
+          // Get section from "Return Flights" to end of message (or next section)
+          const returnSection = messageContent.substring(returnFlightsIndex);
+          const returnSectionDates = [];
+          datePatterns.forEach(pattern => {
+            const matches = returnSection.match(pattern);
+            if (matches) {
+              returnSectionDates.push(...matches);
+            }
+          });
+          // Use first date found in Return Flights section
+          if (returnSectionDates.length > 0 && !returnDate) {
+            returnDate = returnSectionDates[0];
+          }
         }
+        
+        // If still no returnDate, try to use second date from entire message (but not first date)
+        if (!returnDate) {
+          if (dateMatches.length > 1) {
+            returnDate = dateMatches[1]; // Use second date as return date
+          }
+          // Don't use first date as fallback for return flights - it's the departure date
+        }
+        
+        // Clear departureDate for Return Flights table - we don't want to show it
+        departureDate = null;
       } else {
-        // For Outbound Flights, use the first date
-        departureDate = dateMatches[0];
-        if (dateMatches.length > 1) {
-          returnDate = dateMatches[1];
+        // For Outbound Flights, ONLY find date in the "Outbound Flights" section
+        // Do NOT use dates from Return Flights section
+        const outboundFlightsIndex = messageContent.toLowerCase().indexOf('outbound flights');
+        if (outboundFlightsIndex >= 0) {
+          // Get the section from "Outbound Flights" to "Return Flights" (or end of message)
+          const returnFlightsIndex = messageContent.toLowerCase().indexOf('return flights');
+          const endIndex = returnFlightsIndex >= 0 ? returnFlightsIndex : messageContent.length;
+          const outboundSection = messageContent.substring(outboundFlightsIndex, endIndex);
+          const outboundSectionDates = [];
+          datePatterns.forEach(pattern => {
+            const matches = outboundSection.match(pattern);
+            if (matches) {
+              outboundSectionDates.push(...matches);
+            }
+          });
+          // Use first date found in Outbound Flights section
+          if (outboundSectionDates.length > 0) {
+            departureDate = outboundSectionDates[0];
+          }
+        } else {
+          // Fallback: use the first date from entire message
+          departureDate = dateMatches[0];
         }
+        
+        // Clear returnDate for Outbound Flights table - we don't want to show it
+        returnDate = null;
       }
     }
     
@@ -1100,8 +1155,70 @@ function renderTable(rows, tableIndex = 0, onGenerateItinerary = null, onSaveTri
     }
     
     // Use returnDate for Return Flights table, departureDate for Outbound Flights table
-    const dateToDisplay = isReturnFlightsTable ? returnDate : departureDate;
+    // Ensure we have the correct date for each table type
+    let dateToDisplay = null;
+    if (isReturnFlightsTable) {
+      // For Return Flights, use returnDate
+      dateToDisplay = returnDate;
+      // If returnDate is not found, try to extract from message one more time
+      if (!dateToDisplay) {
+        const returnFlightsIndex = messageContent.toLowerCase().indexOf('return flights');
+        if (returnFlightsIndex >= 0) {
+          const returnSection = messageContent.substring(returnFlightsIndex);
+          const returnSectionDates = [];
+          datePatterns.forEach(pattern => {
+            const matches = returnSection.match(pattern);
+            if (matches) {
+              returnSectionDates.push(...matches);
+            }
+          });
+          if (returnSectionDates.length > 0) {
+            dateToDisplay = returnSectionDates[0];
+          }
+        }
+      }
+    } else {
+      // For Outbound Flights, use departureDate
+      dateToDisplay = departureDate;
+      // If departureDate is not found, try to extract from message one more time
+      if (!dateToDisplay) {
+        const outboundFlightsIndex = messageContent.toLowerCase().indexOf('outbound flights');
+        if (outboundFlightsIndex >= 0) {
+          const returnFlightsIndex = messageContent.toLowerCase().indexOf('return flights');
+          const endIndex = returnFlightsIndex >= 0 ? returnFlightsIndex : messageContent.length;
+          const outboundSection = messageContent.substring(outboundFlightsIndex, endIndex);
+          const outboundSectionDates = [];
+          datePatterns.forEach(pattern => {
+            const matches = outboundSection.match(pattern);
+            if (matches) {
+              outboundSectionDates.push(...matches);
+            }
+          });
+          if (outboundSectionDates.length > 0) {
+            dateToDisplay = outboundSectionDates[0];
+          }
+        }
+      }
+    }
+    
+    // Format date for display (convert to "Nov 20" format if needed)
     if (dateToDisplay) {
+      // If date is in format like "20 Nov 2025" or "Nov 20, 2025", extract just "Nov 20"
+      // Try format: "Nov 20" or "Nov 20, 2025"
+      let monthDayMatch = dateToDisplay.match(/((?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec))\s+(\d{1,2})/i);
+      if (monthDayMatch) {
+        const month = monthDayMatch[1].charAt(0).toUpperCase() + monthDayMatch[1].slice(1).toLowerCase();
+        const day = monthDayMatch[2];
+        dateToDisplay = `${month} ${day}`;
+      } else {
+        // Try reverse format: "20 Nov" or "20 Nov 2025"
+        const reverseMatch = dateToDisplay.match(/(\d{1,2})\s+((?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec))/i);
+        if (reverseMatch) {
+          const day = reverseMatch[1];
+          const month = reverseMatch[2].charAt(0).toUpperCase() + reverseMatch[2].slice(1).toLowerCase();
+          dateToDisplay = `${month} ${day}`;
+        }
+      }
       parts.push(dateToDisplay);
     }
     

@@ -3,7 +3,26 @@ import { useNavigate } from 'react-router-dom';
 import MessageBubble from '../components/MessageBubble';
 import ChatInput from '../components/ChatInput';
 import TripPreferencesForm from '../components/TripPreferencesForm';
-import { recordTripSelection, loadTripState, saveTripState } from '../utils/tripState';
+import { recordTripSelection, loadTripState, saveTripState, updateTripRoute } from '../utils/tripState';
+
+// Helper function to convert date string to ISO format (YYYY-MM-DD)
+const formatDateToISO = (dateStr) => {
+  if (!dateStr) return null;
+  try {
+    // Already ISO format
+    if (typeof dateStr === 'string' && dateStr.match(/^\d{4}-\d{2}-\d{2}/)) {
+      return dateStr;
+    }
+    // Parse and convert to ISO
+    const date = new Date(dateStr);
+    if (!isNaN(date.getTime())) {
+      return date.toISOString().split('T')[0]; // YYYY-MM-DD
+    }
+  } catch (e) {
+    console.warn('Error formatting date to ISO:', dateStr, e);
+  }
+  return dateStr; // Return original if conversion fails
+};
 
 // Location detection utility
 async function getLocationContext() {
@@ -528,6 +547,18 @@ export default function Chat({ pendingMessage, onPendingMessageSent, onShowDashb
                 preferenceWeights: userPreferences?.preferences || null
               });
               
+              // Update tripState with route information (including dates in ISO format)
+              if (flightData.route) {
+                updateTripRoute({
+                  departureCode: flightData.route.departureCode,
+                  destinationCode: flightData.route.destinationCode,
+                  departure: flightData.route.departure,
+                  destination: flightData.route.destination,
+                  date: formatDateToISO(flightData.route.date || flightData.route.departure_display),
+                  returnDate: formatDateToISO(flightData.route.returnDate || flightData.route.return_display)
+                });
+              }
+              
               // Update tripState with optimalFlight
               const currentState = loadTripState();
               saveTripState({
@@ -770,14 +801,178 @@ export default function Chat({ pendingMessage, onPendingMessageSent, onShowDashb
 
   // Handle Save Trip button click
   const handleSaveTrip = (messageContent) => {
-    const tripInfo = extractTripInfo(messageContent);
-    const destination = tripInfo.destination || 'your destination';
-    let dates = tripInfo.departureDate ? ` for ${tripInfo.departureDate}` : '';
-    if (tripInfo.returnDate) {
-      dates += ` to ${tripInfo.returnDate}`;
+    // Get dates from dashboardData if available (most reliable source)
+    let departureDate = null;
+    let returnDate = null;
+    let destination = 'your destination';
+    
+    if (dashboardData && dashboardData.route) {
+      departureDate = dashboardData.route.departure_display || dashboardData.route.date;
+      returnDate = dashboardData.route.return_display || dashboardData.route.returnDate;
+      // Prefer destination city name over code, but use code if name is not available
+      destination = dashboardData.route.destination || dashboardData.route.destinationCode || destination;
+    } else {
+      // Fallback: Try to extract from message content, but be more careful
+      const tripInfo = extractTripInfo(messageContent);
+      departureDate = tripInfo.departureDate;
+      returnDate = tripInfo.returnDate;
+      // Only use extracted destination if it looks valid (not "ask for" or other invalid text)
+      if (tripInfo.destination && 
+          tripInfo.destination.length > 2 && 
+          !tripInfo.destination.toLowerCase().includes('ask') &&
+          !tripInfo.destination.toLowerCase().includes('for')) {
+        destination = tripInfo.destination;
+      }
     }
-    const message = `Would you like me to find hotels and activities in ${destination}${dates}?`;
-    handleSend(message);
+    
+    // Try to get dates from tripState as fallback
+    if ((!departureDate || !returnDate) && typeof loadTripState === 'function') {
+      try {
+        const tripState = loadTripState();
+        if (tripState && tripState.route) {
+          if (!departureDate && tripState.route.date) {
+            departureDate = tripState.route.date;
+          }
+          if (!returnDate && tripState.route.returnDate) {
+            returnDate = tripState.route.returnDate;
+          }
+          if (!destination && tripState.route.destination) {
+            destination = tripState.route.destination;
+          }
+        }
+      } catch (e) {
+        console.warn('Error loading tripState:', e);
+      }
+    }
+    
+    // Try to extract dates from message history (user's original request)
+    if ((!departureDate || !returnDate) && messages && messages.length > 0) {
+      // Look for user messages with date information
+      for (let i = messages.length - 1; i >= 0; i--) {
+        const msg = messages[i];
+        if (msg.role === 'user') {
+          const dates = extractDatesFromMessage(msg.content);
+          // Convert Date objects to formatted strings
+          if (dates.departureDate && !departureDate) {
+            if (dates.departureDate instanceof Date) {
+              const monthNames = ['January', 'February', 'March', 'April', 'May', 'June', 
+                                'July', 'August', 'September', 'October', 'November', 'December'];
+              const month = monthNames[dates.departureDate.getMonth()];
+              const day = dates.departureDate.getDate();
+              const getOrdinalSuffix = (d) => {
+                if (d > 3 && d < 21) return 'th';
+                switch (d % 10) {
+                  case 1: return 'st';
+                  case 2: return 'nd';
+                  case 3: return 'rd';
+                  default: return 'th';
+                }
+              };
+              departureDate = `${month} ${day}${getOrdinalSuffix(day)}`;
+            } else {
+              departureDate = dates.departureDate;
+            }
+          }
+          if (dates.returnDate && !returnDate) {
+            if (dates.returnDate instanceof Date) {
+              const monthNames = ['January', 'February', 'March', 'April', 'May', 'June', 
+                                'July', 'August', 'September', 'October', 'November', 'December'];
+              const month = monthNames[dates.returnDate.getMonth()];
+              const day = dates.returnDate.getDate();
+              const getOrdinalSuffix = (d) => {
+                if (d > 3 && d < 21) return 'th';
+                switch (d % 10) {
+                  case 1: return 'st';
+                  case 2: return 'nd';
+                  case 3: return 'rd';
+                  default: return 'th';
+                }
+              };
+              returnDate = `${month} ${day}${getOrdinalSuffix(day)}`;
+            } else {
+              returnDate = dates.returnDate;
+            }
+          }
+          if (departureDate && returnDate) break;
+        }
+      }
+    }
+    
+    // Format dates for display (extract month and day, e.g., "November 20th")
+    const formatDateForDisplay = (dateStr) => {
+      if (!dateStr) return null;
+      
+      // Helper to get ordinal suffix (1st, 2nd, 3rd, 4th, etc.)
+      const getOrdinalSuffix = (day) => {
+        if (day > 3 && day < 21) return 'th';
+        switch (day % 10) {
+          case 1: return 'st';
+          case 2: return 'nd';
+          case 3: return 'rd';
+          default: return 'th';
+        }
+      };
+      
+      // Handle ISO format (YYYY-MM-DD)
+      if (typeof dateStr === 'string' && dateStr.match(/^\d{4}-\d{2}-\d{2}/)) {
+        try {
+          const date = new Date(dateStr);
+          if (!isNaN(date.getTime())) {
+            const monthNames = ['January', 'February', 'March', 'April', 'May', 'June', 
+                              'July', 'August', 'September', 'October', 'November', 'December'];
+            const month = monthNames[date.getMonth()];
+            const day = date.getDate();
+            return `${month} ${day}${getOrdinalSuffix(day)}`;
+          }
+        } catch (e) {
+          console.warn('Error parsing ISO date:', dateStr, e);
+        }
+      }
+      
+      // Try to match patterns like "Nov 21", "Nov 21, 2025", "November 21", etc.
+      const match = dateStr.match(/(Nov|Dec|Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|November|December|January|February|March|April|May|June|July|August|September|October)\s+(\d{1,2})(?:st|nd|rd|th)?/i);
+      if (match) {
+        // Convert abbreviations to full month names
+        const monthMap = {
+          'jan': 'January', 'feb': 'February', 'mar': 'March', 'apr': 'April',
+          'may': 'May', 'jun': 'June', 'jul': 'July', 'aug': 'August',
+          'sep': 'September', 'oct': 'October', 'nov': 'November', 'dec': 'December'
+        };
+        const monthInput = match[1].toLowerCase();
+        let month;
+        if (monthInput.length <= 3) {
+          month = monthMap[monthInput] || match[1].charAt(0).toUpperCase() + match[1].slice(1).toLowerCase();
+        } else {
+          month = match[1].charAt(0).toUpperCase() + match[1].slice(1).toLowerCase();
+        }
+        const day = parseInt(match[2]);
+        return `${month} ${day}${getOrdinalSuffix(day)}`;
+      }
+      return dateStr;
+    };
+    
+    const formattedDeparture = formatDateForDisplay(departureDate);
+    const formattedReturn = formatDateForDisplay(returnDate);
+    
+    // Build the date string - show range only if returnDate exists and is different from departure
+    // Save Trip means the user wants to find hotels/activities for the entire trip period
+    let dateStr = '';
+    if (formattedDeparture && formattedReturn && formattedDeparture !== formattedReturn) {
+      // Show full trip period (departure to return) - only if dates are different
+      dateStr = ` for ${formattedDeparture} to ${formattedReturn}`;
+    } else if (formattedDeparture) {
+      // Only departure date available, or return date is same as departure
+      dateStr = ` for ${formattedDeparture}`;
+    }
+    
+    // Instead of sending a user message, add an assistant message asking the question
+    const assistantMessage = {
+      role: 'assistant',
+      content: `Would you like me to find hotels and activities in ${destination}${dateStr}?`,
+      timestamp: new Date().toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' })
+    };
+    
+    setMessages((prev) => [...prev, assistantMessage]);
   };
 
   const rendered = useMemo(() => messages.map((m, idx) => (

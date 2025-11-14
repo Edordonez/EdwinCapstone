@@ -7,7 +7,26 @@ import Home from './pages/Home';
 import Chat from './pages/Chat';
 import OptimizedItinerary from './pages/OptimizedItinerary';
 import { FlightDashboard } from './components/dashboard/FlightDashboard';
-import { recordTripSelection, loadTripState, saveTripState } from './utils/tripState';
+import { recordTripSelection, loadTripState, saveTripState, updateTripRoute } from './utils/tripState';
+
+// Helper function to convert date string to ISO format (YYYY-MM-DD)
+const formatDateToISO = (dateStr) => {
+  if (!dateStr) return null;
+  try {
+    // Already ISO format
+    if (typeof dateStr === 'string' && dateStr.match(/^\d{4}-\d{2}-\d{2}/)) {
+      return dateStr;
+    }
+    // Parse and convert to ISO
+    const date = new Date(dateStr);
+    if (!isNaN(date.getTime())) {
+      return date.toISOString().split('T')[0]; // YYYY-MM-DD
+    }
+  } catch (e) {
+    console.warn('Error formatting date to ISO:', dateStr, e);
+  }
+  return dateStr; // Return original if conversion fails
+};
 
 function App() {
   const [showDashboard, setShowDashboard] = useState(false);
@@ -35,6 +54,18 @@ function App() {
           route: data.route,
           preferenceWeights: data.preferences?.preferences || null
         });
+        
+        // Update tripState with route information (including dates in ISO format)
+        if (data.route) {
+          updateTripRoute({
+            departureCode: data.route.departureCode,
+            destinationCode: data.route.destinationCode,
+            departure: data.route.departure,
+            destination: data.route.destination,
+            date: formatDateToISO(data.route.date || data.route.departure_display),
+            returnDate: formatDateToISO(data.route.returnDate || data.route.return_display)
+          });
+        }
         
         // Update tripState with optimalFlight
         const currentState = loadTripState();

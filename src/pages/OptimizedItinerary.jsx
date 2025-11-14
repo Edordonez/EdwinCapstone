@@ -42,29 +42,132 @@ const calculateConvenienceScore = (flights, totalPrice, maxPrice) => {
   return Math.max(0, Math.min(100, Math.round(score))); // Clamp between 0-100
 };
 
-// Format date for display
-const formatDate = (dateStr) => {
-  if (!dateStr) return '';
+// Format date for display (accepts Date object or date string)
+const formatDate = (dateInput) => {
+  if (!dateInput) return '';
   try {
-    const date = new Date(dateStr);
+    const date = dateInput instanceof Date ? dateInput : new Date(dateInput);
+    // Check if date is valid
+    if (isNaN(date.getTime())) {
+      console.warn('Invalid date:', dateInput);
+      return '';
+    }
     return date.toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' });
   } catch (e) {
-    return dateStr;
+    console.warn('Error formatting date:', dateInput, e);
+    return '';
   }
 };
 
-// Parse date string to Date object
+// Parse date string to Date object (handles various formats including ISO YYYY-MM-DD)
 const parseDate = (dateStr) => {
-  if (!dateStr) return new Date();
+  if (!dateStr) {
+    console.warn('parseDate: No date string provided');
+    return null;
+  }
   try {
-    // Try ISO format first
-    if (dateStr.includes('-')) {
-      return new Date(dateStr);
+    // If already a Date object, return it
+    if (dateStr instanceof Date) {
+      return dateStr;
     }
-    // Try other formats
-    return new Date(dateStr);
+    
+    if (typeof dateStr !== 'string') {
+      console.warn('parseDate: dateStr is not a string:', typeof dateStr, dateStr);
+      return null;
+    }
+    
+    const cleaned = dateStr.trim();
+    
+    // 1. Try ISO format first (YYYY-MM-DD or YYYY-MM-DDTHH:mm:ss)
+    if (cleaned.match(/^\d{4}-\d{2}-\d{2}/)) {
+      const date = new Date(cleaned);
+      if (!isNaN(date.getTime())) {
+        console.log('Parsed ISO date:', cleaned, '->', date.toISOString().split('T')[0]);
+        return date;
+      }
+    }
+    
+    // 2. Try formats like "Nov 20, 2025" or "November 20, 2025"
+    // Pattern: Month Day, Year
+    const monthDayYearPattern = /(January|February|March|April|May|June|July|August|September|October|November|December|Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+(\d{1,2}),?\s+(\d{4})/i;
+    const monthDayMatch = cleaned.match(monthDayYearPattern);
+    if (monthDayMatch) {
+      const date = new Date(cleaned);
+      if (!isNaN(date.getTime())) {
+        const year = date.getFullYear();
+        // Check if year is reasonable (not 2001 or before 2020)
+        if (year >= 2020) {
+          console.log('Parsed month-day-year format:', cleaned, '->', date.toISOString().split('T')[0]);
+          return date;
+        } else {
+          // Try to extract year from match and fix it
+          const extractedYear = parseInt(monthDayMatch[3]);
+          if (extractedYear >= 2020) {
+            const fixedDate = new Date(cleaned);
+            fixedDate.setFullYear(extractedYear);
+            if (!isNaN(fixedDate.getTime())) {
+              console.log('Fixed date year from', year, 'to', extractedYear);
+              return fixedDate;
+            }
+          }
+        }
+      }
+    }
+    
+    // 3. Try formats like "20 Nov 2025" or "20 November 2025"
+    const dayMonthYearPattern = /(\d{1,2})\s+(January|February|March|April|May|June|July|August|September|October|November|December|Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+(\d{4})/i;
+    const dayMonthMatch = cleaned.match(dayMonthYearPattern);
+    if (dayMonthMatch) {
+      const date = new Date(cleaned);
+      if (!isNaN(date.getTime())) {
+        const year = date.getFullYear();
+        if (year >= 2020) {
+          console.log('Parsed day-month-year format:', cleaned, '->', date.toISOString().split('T')[0]);
+          return date;
+        } else {
+          // Try to extract year from match and fix it
+          const extractedYear = parseInt(dayMonthMatch[3]);
+          if (extractedYear >= 2020) {
+            const fixedDate = new Date(cleaned);
+            fixedDate.setFullYear(extractedYear);
+            if (!isNaN(fixedDate.getTime())) {
+              console.log('Fixed date year from', year, 'to', extractedYear);
+              return fixedDate;
+            }
+          }
+        }
+      }
+    }
+    
+    // 4. Try standard Date constructor (handles most formats)
+    const date = new Date(cleaned);
+    if (!isNaN(date.getTime())) {
+      // Check if the year is reasonable (not 2001 or before 2020)
+      const year = date.getFullYear();
+      if (year < 2020) {
+        console.warn('parseDate: Date year seems wrong:', year, 'from:', cleaned);
+        // If year is 2001 or earlier, try to extract year from the string and fix it
+        const yearMatch = cleaned.match(/\b(20\d{2})\b/);
+        if (yearMatch && parseInt(yearMatch[1]) >= 2020) {
+          const correctYear = parseInt(yearMatch[1]);
+          const fixedDate = new Date(cleaned);
+          fixedDate.setFullYear(correctYear);
+          if (!isNaN(fixedDate.getTime())) {
+            console.log('Fixed date year from', year, 'to', correctYear);
+            return fixedDate;
+          }
+        }
+      } else {
+        console.log('Parsed date (standard):', cleaned, '->', date.toISOString().split('T')[0]);
+        return date;
+      }
+    }
+    
+    console.warn('parseDate: Could not parse date string:', dateStr);
+    return null;
   } catch (e) {
-    return new Date();
+    console.warn('parseDate: Error parsing date:', dateStr, e);
+    return null;
   }
 };
 
@@ -137,21 +240,76 @@ export default function OptimizedItinerary() {
         ? 'http://localhost:8000'
         : (process.env.REACT_APP_API_BASE || 'http://localhost:8000');
 
-      // Parse dates from routeInfo
-      const departureDate = parseDate(routeInfo.date || routeInfo.departure_display);
-      const returnDate = routeInfo.returnDate || routeInfo.return_display ? parseDate(routeInfo.returnDate || routeInfo.return_display) : null;
+      // Get dates from tripState first, fallback to routeInfo
+      let tripState = null;
+      try {
+        const { loadTripState } = require('../utils/tripState');
+        tripState = loadTripState();
+      } catch (e) {
+        console.warn('Could not load tripState for dates:', e);
+      }
       
-      // Calculate check-in and check-out dates
+      const startDateStr = tripState?.startDate || routeInfo.date || routeInfo.departure_display;
+      const endDateStr = tripState?.endDate || routeInfo.returnDate || routeInfo.return_display;
+      
+      const departureDate = parseDate(startDateStr);
+      const returnDate = endDateStr ? parseDate(endDateStr) : null;
+      
+      // Validate dates
+      if (!departureDate) {
+        console.error('Invalid departure date:', startDateStr);
+        throw new Error(`Invalid departure date: ${startDateStr}`);
+      }
+      
+      console.log('Parsed dates:', {
+        startDateStr,
+        endDateStr,
+        departureDate: departureDate.toISOString().split('T')[0],
+        returnDate: returnDate ? returnDate.toISOString().split('T')[0] : null
+      });
+      
+      const originCode = tripState?.originCode || routeInfo.departureCode;
+      const destinationCode = tripState?.destinationCode || routeInfo.destinationCode;
+      
+      console.log('Using tripState for dates and route:', {
+        originCode,
+        destinationCode,
+        startDate: startDateStr,
+        endDate: endDateStr,
+        hasTripState: !!tripState
+      });
+      
+      // Calculate actual trip duration
+      // For round trip: use returnDate
+      // For one-way: only show departure day (1 day itinerary)
+      let tripEndDate = returnDate;
+      let isRoundTrip = !!returnDate;
+      
+      if (!tripEndDate) {
+        // One-way trip: only show departure day
+        tripEndDate = departureDate; // Same as departure date for one-way
+        console.log('No return date provided, creating 1-day itinerary (departure only)');
+      }
+      
+      // Calculate check-in and check-out dates for hotel search
+      // For hotel search, use a reasonable check-out date even for one-way
       const checkInDate = departureDate.toISOString().split('T')[0];
-      const checkOutDate = returnDate ? returnDate.toISOString().split('T')[0] : 
-        new Date(departureDate.getTime() + 7 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
+      const checkOutDateForHotel = returnDate 
+        ? returnDate.toISOString().split('T')[0]
+        : new Date(departureDate.getTime() + 2 * 24 * 60 * 60 * 1000).toISOString().split('T')[0]; // 2 days for hotel search
+      
+      // Calculate actual trip duration in days for itinerary display
+      const tripDurationDays = isRoundTrip 
+        ? Math.ceil((tripEndDate - departureDate) / (1000 * 60 * 60 * 24))
+        : 1; // One-way is always 1 day
+      console.log(`Trip duration: ${tripDurationDays} days (${checkInDate} to ${tripEndDate.toISOString().split('T')[0]})`);
 
       // First, fetch hotels and activities
       console.log('Fetching itinerary data with:', {
         destinationCode: routeInfo.destinationCode,
         destinationName: routeInfo.destination,
         checkIn: checkInDate,
-        checkOut: checkOutDate
+        checkOut: checkOutDateForHotel
       });
 
       const dataResponse = await fetch(`${base}/api/fetchItineraryData`, {
@@ -161,7 +319,7 @@ export default function OptimizedItinerary() {
           destinationCode: routeInfo.destinationCode || routeInfo.destination,
           destinationName: routeInfo.destination || routeInfo.destinationCode,
           checkIn: checkInDate,
-          checkOut: checkOutDate,
+          checkOut: checkOutDateForHotel,
           adults: 1
         })
       });
@@ -184,8 +342,89 @@ export default function OptimizedItinerary() {
       
       console.log(`Fetched ${hotelsData.length} hotels and ${activitiesData.length} activities`);
 
-      // Prepare flights data
-      const flightsData = allFlights.length > 0 ? allFlights.map(flight => ({
+      // Prepare flights data - use optimalFlight from tripState if available
+      let flightsToUse = allFlights;
+      let optimalOutboundFlight = null;
+      let optimalReturnFlight = null;
+      
+      // Helper function to extract airport code from flight
+      const getFlightOrigin = (flight) => {
+        return flight.origin || 
+               flight.departureAirport || 
+               flight.departureCode ||
+               (flight.departure?.match(/([A-Z]{3})/)?.[1]) ||
+               null;
+      };
+      
+      const getFlightDestination = (flight) => {
+        return flight.destination || 
+               flight.arrivalAirport || 
+               flight.arrivalCode ||
+               (flight.arrival?.match(/([A-Z]{3})/)?.[1]) ||
+               null;
+      };
+      
+      // Find optimal flights from all flights using origin/destination matching
+      const allOptimalFlights = [...(outboundFlights || []), ...(returnFlights || []), ...(allFlights || [])]
+        .filter(f => f.optimalFlight || f.isOptimal);
+      
+      for (const flight of allOptimalFlights) {
+        const flightOrigin = getFlightOrigin(flight);
+        const flightDestination = getFlightDestination(flight);
+        
+        console.log('Checking flight:', {
+          flightNumber: flight.flightNumber,
+          origin: flightOrigin,
+          destination: flightDestination,
+          matchesOutbound: flightOrigin === originCode && flightDestination === destinationCode,
+          matchesReturn: flightOrigin === destinationCode && flightDestination === originCode
+        });
+        
+        // Outbound: origin === originCode && destination === destinationCode
+        if (flightOrigin === originCode && flightDestination === destinationCode) {
+          if (!optimalOutboundFlight) {
+            optimalOutboundFlight = flight;
+            console.log('Found optimal outbound flight:', flight.flightNumber);
+          }
+        }
+        // Return: origin === destinationCode && destination === originCode
+        else if (flightOrigin === destinationCode && flightDestination === originCode) {
+          if (!optimalReturnFlight) {
+            optimalReturnFlight = flight;
+            console.log('Found optimal return flight:', flight.flightNumber);
+          }
+        }
+      }
+      
+      // Fallback: use outboundFlights/returnFlights arrays if available
+      if (!optimalOutboundFlight && outboundFlights && outboundFlights.length > 0) {
+        optimalOutboundFlight = outboundFlights.find(f => f.optimalFlight || f.isOptimal);
+      }
+      
+      if (!optimalReturnFlight && returnFlights && returnFlights.length > 0) {
+        optimalReturnFlight = returnFlights.find(f => f.optimalFlight || f.isOptimal);
+      }
+      
+      // Final fallback: use tripState.optimalFlight
+      if (tripState?.optimalFlight && (!optimalOutboundFlight || !optimalReturnFlight)) {
+        const flightOrigin = getFlightOrigin(tripState.optimalFlight);
+        const flightDestination = getFlightDestination(tripState.optimalFlight);
+        
+        if (flightOrigin === originCode && flightDestination === destinationCode && !optimalOutboundFlight) {
+          optimalOutboundFlight = tripState.optimalFlight;
+          console.log('Using tripState.optimalFlight as outbound');
+        } else if (flightOrigin === destinationCode && flightDestination === originCode && !optimalReturnFlight) {
+          optimalReturnFlight = tripState.optimalFlight;
+          console.log('Using tripState.optimalFlight as return');
+        }
+      }
+      
+      console.log('Final flight selection:', {
+        outbound: optimalOutboundFlight?.flightNumber || 'N/A',
+        return: optimalReturnFlight?.flightNumber || 'N/A'
+      });
+      
+      const flightsData = flightsToUse.length > 0 ? flightsToUse.map(flight => ({
         id: flight.id || flight.flightNumber || `flight-${Math.random()}`,
         price: flight.price || 0,
         duration: flight.duration || '0h',
@@ -209,6 +448,15 @@ export default function OptimizedItinerary() {
           arrival: routeInfo.destinationCode || routeInfo.destination,
           stops: 0
         });
+      }
+      
+      // Validate that we have at least some data
+      if (flightsData.length === 0) {
+        throw new Error('No flight data available. Please go back and search for flights first.');
+      }
+      
+      if (hotelsData.length === 0 && activitiesData.length === 0) {
+        console.warn('No hotels or activities found. Continuing with flights only.');
       }
 
       // Format preferences for backend - backend expects {budget, quality, convenience} as floats
@@ -248,18 +496,40 @@ export default function OptimizedItinerary() {
       console.log('generateOptimalItinerary result:', result);
       
       if (!result.ok) {
-        throw new Error(result.error || 'Failed to generate itinerary');
+        const errorMsg = result.error || 'Failed to generate itinerary';
+        // Provide more helpful error messages
+        if (errorMsg.includes('No valid combination found within budget')) {
+          throw new Error('Unable to find a combination within the budget. Try adjusting your preferences or increasing your budget.');
+        } else if (errorMsg.includes('No hotels') || errorMsg.includes('No activities')) {
+          throw new Error('Unable to find hotels or activities for this destination. The itinerary will show flights only.');
+        } else {
+          throw new Error(errorMsg);
+        }
       }
 
       // Create day-by-day itinerary structure
+      // Use optimal flights if available, otherwise use result.flight
+      const outboundFlight = optimalOutboundFlight || result.flight;
+      const returnFlight = optimalReturnFlight || result.flight;
+      
+      console.log('Using flights for itinerary:', {
+        outbound: outboundFlight?.flightNumber || 'N/A',
+        return: returnFlight?.flightNumber || 'N/A',
+        hasOptimalOutbound: !!optimalOutboundFlight,
+        hasOptimalReturn: !!optimalReturnFlight,
+        startDate: departureDate.toISOString().split('T')[0],
+        endDate: tripEndDate.toISOString().split('T')[0]
+      });
+      
       const days = createDayByDayItinerary(
-        result.flight,
+        outboundFlight, // Use optimal outbound flight if available
         result.hotel,
         result.activity ? [result.activity] : [],
         activitiesData,
         routeInfo,
-        departureDate,
-        returnDate || checkOutDate
+        departureDate, // startDate
+        tripEndDate, // endDate
+        returnFlight // Use optimal return flight if available
       );
 
       setItineraryData({
@@ -281,75 +551,79 @@ export default function OptimizedItinerary() {
     generateItinerary();
   }, [generateItinerary]);
 
-  const createDayByDayItinerary = (flight, hotel, selectedActivity, allActivities, routeInfo, startDate, endDate) => {
+  const createDayByDayItinerary = (flight, hotel, selectedActivity, allActivities, routeInfo, startDate, endDate, returnFlight = null) => {
     const days = [];
-    const endDateObj = parseDate(endDate);
-    const daysDiff = Math.ceil((endDateObj - startDate) / (1000 * 60 * 60 * 24)) || 1;
+    
+    // Parse dates - ensure they are Date objects
+    let endDateObj = null;
+    let startDateObj = null;
+    
+    if (startDate instanceof Date) {
+      startDateObj = startDate;
+    } else if (startDate) {
+      startDateObj = parseDate(startDate);
+    }
+    
+    if (endDate instanceof Date) {
+      endDateObj = endDate;
+    } else if (endDate) {
+      endDateObj = parseDate(endDate);
+    }
+    
+    // Validate dates
+    if (!startDateObj || isNaN(startDateObj.getTime())) {
+      console.error('Invalid startDate:', startDate);
+      throw new Error(`Invalid start date: ${startDate}`);
+    }
+    
+    // For one-way trips, endDate might be null or same as startDate
+    if (!endDateObj || isNaN(endDateObj.getTime())) {
+      endDateObj = startDateObj; // Use startDate as endDate for one-way trips
+    }
+    
+    console.log('createDayByDayItinerary dates:', {
+      startDate: startDateObj.toISOString().split('T')[0],
+      endDate: endDateObj.toISOString().split('T')[0],
+      startDateType: typeof startDate,
+      endDateType: typeof endDate
+    });
+    
+    // Check if this is a round trip (endDate is different from startDate)
+    const isRoundTrip = endDateObj && endDateObj.getTime() !== startDateObj.getTime();
+    
+    // Calculate actual trip duration in days
+    // For one-way: always 1 day (departure only)
+    // For round trip: actual days between start and end
+    const daysDiff = isRoundTrip 
+      ? Math.max(1, Math.ceil((endDateObj - startDateObj) / (1000 * 60 * 60 * 24)))
+      : 1; // One-way is always 1 day
+    
+    console.log(`Creating itinerary for ${daysDiff} days (${startDateObj.toISOString().split('T')[0]} to ${endDateObj.toISOString().split('T')[0]})`);
     
     // Day 1: Outbound flight + arrival
-    days.push({
-      day: 1,
-      date: formatDate(startDate),
-      dateObj: startDate,
-      items: [
-        {
-          type: 'flight',
-          title: `${flight?.airline || 'Flight'} ${flight?.flightNumber || ''}`,
-          time: flight?.departure || 'TBD',
-          details: {
-            departure: flight?.departure || routeInfo.departureCode,
-            arrival: flight?.arrival || routeInfo.destinationCode,
-            duration: flight?.duration ? (typeof flight.duration === 'number' ? `${flight.duration.toFixed(1)}h` : flight.duration) : 'N/A',
-            stops: flight?.stops || 0,
-            price: flight?.price || 0,
-            airline: flight?.airline,
-            flightNumber: flight?.flightNumber
-          }
-        },
-        {
-          type: 'hotel',
-          title: hotel?.name || 'Hotel',
-          time: 'Check-in',
-          details: {
-            location: hotel?.location || routeInfo.destination,
-            distance: hotel?.distance || 0,
-            rating: hotel?.rating || 0,
-            price: hotel?.price || 0,
-            name: hotel?.name
-          }
+    const day1Items = [
+      {
+        type: 'flight',
+        title: `${flight?.airline || 'Flight'} ${flight?.flightNumber || ''}`,
+        time: flight?.departure || 'TBD',
+        details: {
+          departure: flight?.departure || routeInfo.departureCode,
+          arrival: flight?.arrival || routeInfo.destinationCode,
+          duration: flight?.duration ? (typeof flight.duration === 'number' ? `${flight.duration.toFixed(1)}h` : flight.duration) : 'N/A',
+          stops: flight?.stops || 0,
+          price: flight?.price || 0,
+          airline: flight?.airline,
+          flightNumber: flight?.flightNumber
         }
-      ]
-    });
-
-    // Middle days: Activities
-    for (let i = 1; i < daysDiff; i++) {
-      const currentDate = new Date(startDate.getTime() + i * 24 * 60 * 60 * 1000);
-      const dayActivities = allActivities.slice(i * 2 - 1, i * 2 + 1); // 2 activities per day
-      
-      const dayItems = [];
-      
-      if (dayActivities.length > 0) {
-        dayActivities.forEach((activity, idx) => {
-          dayItems.push({
-            type: 'activity',
-            title: activity.name || 'Activity',
-            time: idx === 0 ? 'Morning' : 'Afternoon',
-            details: {
-              description: activity.description || activity.shortDescription || '',
-              duration: activity.minimumDuration || activity.duration || 'N/A',
-              rating: activity.rating || 0,
-              price: activity.price?.amount || activity.price || 0,
-              location: activity.geoCode ? `${activity.geoCode.latitude}, ${activity.geoCode.longitude}` : ''
-            }
-          });
-        });
       }
-      
-      // Add hotel stay
-      dayItems.push({
+    ];
+    
+    // Add hotel check-in only for round trips or if hotel is available
+    if (hotel && !hotel.isDummy) {
+      day1Items.push({
         type: 'hotel',
         title: hotel?.name || 'Hotel',
-        time: 'Overnight',
+        time: 'Check-in',
         details: {
           location: hotel?.location || routeInfo.destination,
           distance: hotel?.distance || 0,
@@ -358,38 +632,137 @@ export default function OptimizedItinerary() {
           name: hotel?.name
         }
       });
+    }
+    
+    // Day 1 (startDate): Outbound flight
+    days.push({
+      day: null, // Will be set after sorting
+      date: formatDate(startDateObj),
+      dateObj: startDateObj,
+      items: day1Items
+    });
+
+    // Middle days: Only for round trips with more than 1 day
+    // Limit to maximum 5 middle days to avoid too many days
+    if (isRoundTrip && daysDiff > 1) {
+      const maxMiddleDays = Math.min(daysDiff - 1, 5); // Maximum 5 middle days
       
-      days.push({
-        day: i + 1,
-        date: formatDate(currentDate),
-        dateObj: currentDate,
-        items: dayItems
-      });
+      for (let i = 1; i <= maxMiddleDays; i++) {
+        const currentDate = new Date(startDateObj.getTime() + i * 24 * 60 * 60 * 1000);
+        
+        // Skip if this date is the return date (will be handled separately)
+        if (currentDate.toISOString().split('T')[0] === endDateObj.toISOString().split('T')[0]) {
+          continue;
+        }
+        
+        // Distribute activities across days (max 2 per day)
+        const activitiesPerDay = Math.ceil(allActivities.length / maxMiddleDays);
+        const startIdx = (i - 1) * activitiesPerDay;
+        const endIdx = startIdx + activitiesPerDay;
+        const dayActivities = allActivities.slice(startIdx, endIdx);
+      
+        const dayItems = [];
+      
+        if (dayActivities.length > 0) {
+          dayActivities.forEach((activity, idx) => {
+            dayItems.push({
+              type: 'activity',
+              title: activity.name || 'Activity',
+              time: idx === 0 ? 'Morning' : 'Afternoon',
+              details: {
+                description: activity.description || activity.shortDescription || '',
+                duration: activity.minimumDuration || activity.duration || 'N/A',
+                rating: activity.rating || 0,
+                price: activity.price?.amount || activity.price || 0,
+                location: activity.geoCode ? `${activity.geoCode.latitude}, ${activity.geoCode.longitude}` : ''
+              }
+            });
+          });
+        }
+      
+        // Add hotel stay only if hotel is available
+        if (hotel && !hotel.isDummy) {
+          dayItems.push({
+            type: 'hotel',
+            title: hotel?.name || 'Hotel',
+            time: 'Overnight',
+            details: {
+              location: hotel?.location || routeInfo.destination,
+              distance: hotel?.distance || 0,
+              rating: hotel?.rating || 0,
+              price: hotel?.price || 0,
+              name: hotel?.name
+            }
+          });
+        }
+      
+        days.push({
+          day: null, // Will be set after sorting
+          date: formatDate(currentDate),
+          dateObj: currentDate,
+          items: dayItems
+        });
+      }
     }
 
-    // Last day: Return flight (if return date exists and is different from start date)
-    if (endDate && endDateObj && endDateObj > startDate) {
+    // Last day (endDate): Return flight (only for round trips)
+    if (isRoundTrip && endDateObj && endDateObj > startDateObj) {
+      // Use actual return flight data if available
+      const returnFlightData = returnFlight || {};
+      
+      // Extract time from departure string (e.g., "27 Nov 2025, 10:30" -> "10:30")
+      let departureTime = 'TBD';
+      if (returnFlightData.departure) {
+        const timeMatch = returnFlightData.departure.match(/(\d{1,2}:\d{2})/);
+        if (timeMatch) {
+          departureTime = timeMatch[1];
+        } else {
+          departureTime = returnFlightData.departure;
+        }
+      } else if (returnFlightData.departureTime) {
+        departureTime = returnFlightData.departureTime;
+      }
+      
+      // Extract airport codes - return flight departs from destination, arrives at origin
+      const departureAirport = returnFlightData.departureAirport || 
+                               (returnFlightData.departure?.match(/([A-Z]{3})/) ? returnFlightData.departure.match(/([A-Z]{3})/)[1] : null) ||
+                               routeInfo.destinationCode;
+      const arrivalAirport = returnFlightData.arrivalAirport || 
+                             (returnFlightData.arrival?.match(/([A-Z]{3})/) ? returnFlightData.arrival.match(/([A-Z]{3})/)[1] : null) ||
+                             routeInfo.departureCode;
+      
       days.push({
-        day: days.length + 1,
+        day: null, // Will be set after sorting
         date: formatDate(endDateObj),
         dateObj: endDateObj,
         items: [
           {
             type: 'flight',
-            title: 'Return Flight',
-            time: 'TBD',
+            title: `${returnFlightData.airline || 'Return'} ${returnFlightData.flightNumber || 'Flight'}`,
+            time: departureTime,
             details: {
-              departure: routeInfo.destinationCode,
-              arrival: routeInfo.departureCode,
-              duration: 'TBD',
-              stops: 0,
-              price: 0
+              departure: returnFlightData.departure || `${departureAirport} ${departureTime}`,
+              arrival: returnFlightData.arrival || `${arrivalAirport} TBD`,
+              duration: returnFlightData.duration ? (typeof returnFlightData.duration === 'number' ? `${returnFlightData.duration.toFixed(1)}h` : returnFlightData.duration) : 'TBD',
+              stops: returnFlightData.stops || 0,
+              price: returnFlightData.price || 0,
+              airline: returnFlightData.airline,
+              flightNumber: returnFlightData.flightNumber
             }
           }
         ]
       });
     }
 
+    // Sort days by date (ascending)
+    days.sort((a, b) => a.dateObj.getTime() - b.dateObj.getTime());
+    
+    // Assign day numbers (Day 1, Day 2, etc.)
+    days.forEach((day, index) => {
+      day.day = index + 1;
+    });
+
+    console.log(`Created ${days.length} days for itinerary (sorted and labeled)`);
     return days;
   };
 
@@ -517,8 +890,24 @@ export default function OptimizedItinerary() {
                 Optimized Itinerary
               </h1>
               <p style={{ color: '#64748b', fontSize: '18px' }}>
-                {routeInfo.departure} → {routeInfo.destination} • {routeInfo.date}
-                {routeInfo.returnDate ? ` - ${routeInfo.returnDate}` : ''}
+                {(() => {
+                  // Use tripState originCode/destinationCode if available, fallback to routeInfo
+                  let tripState = null;
+                  try {
+                    const { loadTripState } = require('../utils/tripState');
+                    tripState = loadTripState();
+                  } catch (e) {
+                    // Ignore
+                  }
+                  
+                  const originCode = tripState?.originCode || routeInfo.departureCode || routeInfo.departure;
+                  const destinationCode = tripState?.destinationCode || routeInfo.destinationCode || routeInfo.destination;
+                  const startDate = tripState?.startDate || routeInfo.date || routeInfo.departure_display;
+                  const endDate = tripState?.endDate || routeInfo.returnDate || routeInfo.return_display;
+                  
+                  const dateRange = endDate ? `${startDate} - ${endDate}` : startDate;
+                  return `${originCode} → ${destinationCode} • ${dateRange}`;
+                })()}
               </p>
             </div>
             <div style={{ display: 'flex', gap: '12px', flexWrap: 'wrap' }}>

@@ -1061,6 +1061,42 @@ def generateOptimalItinerary(flights: List[Dict[str, Any]], hotels: List[Dict[st
     
     logger.info(f"[OPTIMAL_ITINERARY] Normalized: {len(normalized_flights)} flights, {len(normalized_hotels)} hotels, {len(normalized_activities)} activities")
     
+    # Handle cases where hotels or activities are missing
+    if len(normalized_flights) == 0:
+        return {
+            'error': 'No flights provided',
+            'ok': False
+        }
+    
+    # If no hotels or activities, create dummy entries with zero price
+    if len(normalized_hotels) == 0:
+        logger.warning("[OPTIMAL_ITINERARY] No hotels found, using dummy hotel")
+        normalized_hotels = [{
+            'id': 'dummy-hotel',
+            'name': 'Hotel information not available',
+            '_price': 0,
+            '_rating': 3.0,
+            '_distance': 5.0,
+            '_budget_score': 0.5,
+            '_quality_score': 0.6,
+            '_convenience_score': 0.5,
+            '_category_score': 0.53
+        }]
+    
+    if len(normalized_activities) == 0:
+        logger.warning("[OPTIMAL_ITINERARY] No activities found, using dummy activity")
+        normalized_activities = [{
+            'id': 'dummy-activity',
+            'name': 'Activity information not available',
+            '_price': 0,
+            '_rating': 4.0,
+            '_duration': 2.0,
+            '_budget_score': 0.5,
+            '_quality_score': 0.8,
+            '_convenience_score': 0.5,
+            '_category_score': 0.6
+        }]
+    
     # Find best combination
     best_combination = None
     best_total_score = -1
@@ -1074,8 +1110,8 @@ def generateOptimalItinerary(flights: List[Dict[str, Any]], hotels: List[Dict[st
                 # Calculate total price
                 total_price = flight['_price'] + hotel['_price'] + activity['_price']
                 
-                # Filter out if exceeds budget
-                if total_price > userBudget:
+                # Filter out if exceeds budget (but allow if hotels/activities are dummy with 0 price)
+                if total_price > userBudget and hotel.get('id') != 'dummy-hotel' and activity.get('id') != 'dummy-activity':
                     continue
                 
                 # Calculate total combined score (average of three category scores)
@@ -1101,7 +1137,7 @@ def generateOptimalItinerary(flights: List[Dict[str, Any]], hotels: List[Dict[st
     
     if not best_combination:
         return {
-            'error': 'No valid combination found within budget',
+            'error': 'No valid combination found within budget. Try increasing your budget or adjusting preferences.',
             'ok': False
         }
     
@@ -1153,28 +1189,30 @@ def generateOptimalItinerary(flights: List[Dict[str, Any]], hotels: List[Dict[st
             'name': hotel.get('name', 'Unknown Hotel'),
             'price': hotel['_price'],
             'rating': hotel['_rating'],
-            'distance': hotel['_distance'],
+            'distance': hotel.get('_distance', hotel.get('distance', 0)),
             'location': hotel.get('location', hotel.get('city', 'N/A')),
             'scores': {
                 'budget': hotel['_budget_score'],
                 'quality': hotel['_quality_score'],
                 'convenience': hotel['_convenience_score'],
                 'total': hotel['_category_score']
-            }
+            },
+            'isDummy': hotel.get('id') == 'dummy-hotel'
         },
         'activity': {
             'id': activity.get('id'),
             'name': activity.get('name', 'Unknown Activity'),
             'price': activity['_price'],
             'rating': activity['_rating'],
-            'duration': activity['_duration'],
+            'duration': activity.get('_duration', activity.get('duration', 0)),
             'description': activity.get('shortDescription', activity.get('description', '')),
             'scores': {
                 'budget': activity['_budget_score'],
                 'quality': activity['_quality_score'],
                 'convenience': activity['_convenience_score'],
                 'total': activity['_category_score']
-            }
+            },
+            'isDummy': activity.get('id') == 'dummy-activity'
         },
         'total_price': best_combination['total_price'],
         'total_score': best_combination['total_score'],
