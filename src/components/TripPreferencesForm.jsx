@@ -25,6 +25,11 @@ const TripPreferencesForm = ({ onComplete }) => {
     setResults(null);
 
     const weights = normalizeWeights(budget, quality, convenience);
+    console.log('[TripPreferencesForm] Normalized weights:', JSON.stringify(weights, null, 2));
+    console.log('[TripPreferencesForm] Raw values - budget:', budget, 'quality:', quality, 'convenience:', convenience);
+    console.log('[TripPreferencesForm] Budget weight:', weights.budget);
+    console.log('[TripPreferencesForm] Quality weight:', weights.quality);
+    console.log('[TripPreferencesForm] Convenience weight:', weights.convenience);
 
     try {
       const isLocalhost = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1';
@@ -57,10 +62,12 @@ const TripPreferencesForm = ({ onComplete }) => {
       
       // Call onComplete callback with preferences
       if (onComplete) {
-        onComplete({
+        const preferencesData = {
           preferences: weights,
           rawValues: { budget, quality, convenience }
-        });
+        };
+        console.log('[TripPreferencesForm] Calling onComplete with:', JSON.stringify(preferencesData, null, 2));
+        onComplete(preferencesData);
       }
     } catch (err) {
       console.error('Error optimizing trip:', err);

@@ -125,6 +125,7 @@ def format_flight_for_dashboard(
     # Sort flights based on user preferences or by price
     if user_preferences and (formatted_response["outboundFlights"] or formatted_response["returnFlights"]):
         logger.info(f"[FLIGHT_FORMATTER] Sorting flights by user preferences: {user_preferences}")
+        logger.info(f"[FLIGHT_FORMATTER] Preferences type: {type(user_preferences)}, values: budget={user_preferences.get('budget')}, quality={user_preferences.get('quality')}, convenience={user_preferences.get('convenience')}")
         
         # Calculate preference scores for all flights
         all_flights = formatted_response["outboundFlights"] + formatted_response["returnFlights"]
@@ -142,13 +143,15 @@ def format_flight_for_dashboard(
             min_duration = min(durations_hours) if durations_hours else 1
             max_duration = max(durations_hours) if durations_hours else 1
             
+            logger.info(f"[FLIGHT_FORMATTER] Price range: ${min_price:.2f} - ${max_price:.2f}, Duration range: {min_duration:.2f}h - {max_duration:.2f}h")
+            
             # Calculate scores for outbound flights
             for flight in formatted_response["outboundFlights"]:
                 score = _calculate_preference_score(
                     flight, user_preferences, min_price, max_price, min_duration, max_duration
                 )
                 flight['preferenceScore'] = score
-                logger.info(f"[FLIGHT_FORMATTER] Flight {flight.get('flightNumber')} preference score: {score:.4f}")
+                logger.info(f"[FLIGHT_FORMATTER] Outbound Flight {flight.get('flightNumber')} - Price: ${flight.get('price')}, Stops: {flight.get('stops')}, Duration: {flight.get('duration')}, Score: {score:.4f}")
             
             # Calculate scores for return flights
             for flight in formatted_response["returnFlights"]:
@@ -156,10 +159,24 @@ def format_flight_for_dashboard(
                     flight, user_preferences, min_price, max_price, min_duration, max_duration
                 )
                 flight['preferenceScore'] = score
+                logger.info(f"[FLIGHT_FORMATTER] Return Flight {flight.get('flightNumber')} - Price: ${flight.get('price')}, Stops: {flight.get('stops')}, Duration: {flight.get('duration')}, Score: {score:.4f}")
             
             # Sort by preference score (higher is better)
             formatted_response["outboundFlights"].sort(key=lambda x: x.get('preferenceScore', 0), reverse=True)
             formatted_response["returnFlights"].sort(key=lambda x: x.get('preferenceScore', 0), reverse=True)
+            
+            # Mark the highest scoring flight as optimalFlight
+            if formatted_response["outboundFlights"]:
+                best_outbound = formatted_response["outboundFlights"][0]
+                best_outbound["isOptimal"] = True
+                best_outbound["optimalFlight"] = True
+                logger.info(f"[FLIGHT_FORMATTER] Marked optimal outbound flight: {best_outbound.get('flightNumber')} (score: {best_outbound.get('preferenceScore', 0):.4f})")
+            
+            if formatted_response["returnFlights"]:
+                best_return = formatted_response["returnFlights"][0]
+                best_return["isOptimal"] = True
+                best_return["optimalFlight"] = True
+                logger.info(f"[FLIGHT_FORMATTER] Marked optimal return flight: {best_return.get('flightNumber')} (score: {best_return.get('preferenceScore', 0):.4f})")
             
             logger.info(f"[FLIGHT_FORMATTER] Top outbound flight after sorting: {formatted_response['outboundFlights'][0].get('flightNumber') if formatted_response['outboundFlights'] else 'None'} (score: {formatted_response['outboundFlights'][0].get('preferenceScore', 0) if formatted_response['outboundFlights'] else 0})")
     else:
@@ -168,9 +185,10 @@ def format_flight_for_dashboard(
         formatted_response["outboundFlights"].sort(key=lambda x: x["price"])
         formatted_response["returnFlights"].sort(key=lambda x: x["price"])
     
-    # Mark best deals
-    _mark_best_deals(formatted_response["outboundFlights"])
-    _mark_best_deals(formatted_response["returnFlights"])
+    # Mark best deals (only if preferences weren't used, otherwise already marked above)
+    if not user_preferences:
+        _mark_best_deals(formatted_response["outboundFlights"])
+        _mark_best_deals(formatted_response["returnFlights"])
     
     # CRITICAL: Filter out placeholder rows with '---' values before returning
     def is_placeholder_value(value):
@@ -479,6 +497,8 @@ def _calculate_preference_score(
     quality_weight = preferences.get('quality', 0.33)
     convenience_weight = preferences.get('convenience', 0.34)
     
+    logger.debug(f"[FLIGHT_FORMATTER] Score calculation - Weights: budget={budget_weight:.3f}, quality={quality_weight:.3f}, convenience={convenience_weight:.3f}")
+    
     # Normalize price score (lower price = higher score)
     price = flight.get('price', max_price)
     if max_price > min_price:
@@ -512,10 +532,11 @@ def _calculate_preference_score(
     )
     
     logger.debug(f"[FLIGHT_FORMATTER] Score calculation for {flight.get('flightNumber')}: "
-                f"price_score={normalized_price_score:.3f} (weight={budget_weight}), "
-                f"quality_score={quality_score:.3f} (weight={quality_weight}), "
-                f"convenience_score={normalized_convenience_score:.3f} (weight={convenience_weight}), "
-                f"total={total_score:.3f}")
+                f"price=${price:.2f}, stops={stops}, duration={duration_hours:.2f}h | "
+                f"price_score={normalized_price_score:.3f} (weight={budget_weight:.3f}), "
+                f"quality_score={quality_score:.3f} (weight={quality_weight:.3f}), "
+                f"convenience_score={normalized_convenience_score:.3f} (weight={convenience_weight:.3f}), "
+                f"total={total_score:.4f}")
     
     return total_score
 

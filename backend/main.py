@@ -1380,6 +1380,13 @@ async def optimize_trip(preferences: TripPreferences):
 @app.post("/api/chat")
 async def chat(req: ChatRequest):
     try:
+        # Log received preferences
+        logger.info(f"[MAIN] /api/chat received request with preferences: {req.preferences}")
+        if req.preferences:
+            logger.info(f"[MAIN] Preferences type: {type(req.preferences)}, content: {req.preferences}")
+        else:
+            logger.warning(f"[MAIN] ⚠️ No preferences in request!")
+        
         # Validate that we have messages
         if not req.messages or len(req.messages) == 0:
             raise HTTPException(status_code=400, detail="No messages provided")
@@ -1632,6 +1639,10 @@ async def chat(req: ChatRequest):
                             user_prefs = req.preferences if req.preferences else None
                             if user_prefs:
                                 logger.info(f"[MAIN] Using user preferences for sorting: {user_prefs}")
+                                logger.info(f"[MAIN] Preferences type: {type(user_prefs)}, keys: {user_prefs.keys() if isinstance(user_prefs, dict) else 'N/A'}")
+                                logger.info(f"[MAIN] Preferences values: budget={user_prefs.get('budget') if isinstance(user_prefs, dict) else 'N/A'}, quality={user_prefs.get('quality') if isinstance(user_prefs, dict) else 'N/A'}, convenience={user_prefs.get('convenience') if isinstance(user_prefs, dict) else 'N/A'}")
+                            else:
+                                logger.warning(f"[MAIN] ⚠️ No user preferences provided! req.preferences = {req.preferences}")
                             
                             try:
                                 formatted_data = format_flight_for_dashboard(

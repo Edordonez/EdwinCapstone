@@ -983,6 +983,10 @@ function renderTable(rows, tableIndex = 0, onGenerateItinerary = null, onSaveTri
       destCity = routeMatch[2].trim().split(/\s+/)[0].replace(/\([^)]*\)/g, '').trim();
     }
     
+    // Check if this is a Return Flights table
+    const isReturnFlightsTable = messageContent.toLowerCase().includes('return flights') || 
+                                  messageContent.toLowerCase().includes('## return flights');
+    
     // Extract dates from message
     let departureDate = null;
     let returnDate = null;
@@ -996,6 +1000,27 @@ function renderTable(rows, tableIndex = 0, onGenerateItinerary = null, onSaveTri
     const monthAbbrevs = ['jan', 'feb', 'mar', 'apr', 'may', 'jun',
                          'jul', 'aug', 'sep', 'oct', 'nov', 'dec'];
     
+    // Try to extract date from table's Departure column first (for Return Flights)
+    if (isReturnFlightsTable && rows.length > 1) {
+      const departureColIndex = getColumnIndex(['departure']);
+      if (departureColIndex >= 0 && rows[1] && rows[1][departureColIndex]) {
+        const departureCell = rows[1][departureColIndex].toString();
+        // Extract date from departure cell (e.g., "27 Nov 2025, 10:30" -> "27 Nov 2025")
+        const dateMatch = departureCell.match(/(\d{1,2}\s+(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\s+\d{4})/i);
+        if (dateMatch) {
+          returnDate = dateMatch[1];
+        } else {
+          // Try other date patterns
+          datePatterns.forEach(pattern => {
+            const matches = departureCell.match(pattern);
+            if (matches && matches.length > 0) {
+              returnDate = matches[0];
+            }
+          });
+        }
+      }
+    }
+    
     const dateMatches = [];
     datePatterns.forEach(pattern => {
       const matches = messageContent.match(pattern);
@@ -1005,9 +1030,19 @@ function renderTable(rows, tableIndex = 0, onGenerateItinerary = null, onSaveTri
     });
     
     if (dateMatches.length > 0) {
-      departureDate = dateMatches[0];
-      if (dateMatches.length > 1) {
-        returnDate = dateMatches[1];
+      if (isReturnFlightsTable) {
+        // For Return Flights, use the second date (return date) if available
+        if (dateMatches.length > 1) {
+          returnDate = returnDate || dateMatches[1];
+        } else if (!returnDate) {
+          returnDate = dateMatches[0]; // Fallback to first date if only one found
+        }
+      } else {
+        // For Outbound Flights, use the first date
+        departureDate = dateMatches[0];
+        if (dateMatches.length > 1) {
+          returnDate = dateMatches[1];
+        }
       }
     }
     
@@ -1064,8 +1099,10 @@ function renderTable(rows, tableIndex = 0, onGenerateItinerary = null, onSaveTri
       return { display: null, data: summaryData };
     }
     
-    if (departureDate) {
-      parts.push(departureDate);
+    // Use returnDate for Return Flights table, departureDate for Outbound Flights table
+    const dateToDisplay = isReturnFlightsTable ? returnDate : departureDate;
+    if (dateToDisplay) {
+      parts.push(dateToDisplay);
     }
     
     if (cleanPrice) {

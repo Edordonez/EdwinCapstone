@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import MessageBubble from '../components/MessageBubble';
 import ChatInput from '../components/ChatInput';
 import TripPreferencesForm from '../components/TripPreferencesForm';
+import { recordTripSelection, loadTripState, saveTripState } from '../utils/tripState';
 
 // Location detection utility
 async function getLocationContext() {
@@ -117,6 +118,17 @@ async function sendToApi(messages, context, sessionId, preferences = null) {
   
   if (preferences && preferences.preferences) {
     requestBody.preferences = preferences.preferences;
+    console.log('[Chat] Sending preferences to API:', JSON.stringify(preferences.preferences, null, 2));
+    console.log('[Chat] Preferences values:', {
+      budget: preferences.preferences.budget,
+      quality: preferences.preferences.quality,
+      convenience: preferences.preferences.convenience
+    });
+    console.log('[Chat] Budget weight:', preferences.preferences.budget);
+    console.log('[Chat] Quality weight:', preferences.preferences.quality);
+    console.log('[Chat] Convenience weight:', preferences.preferences.convenience);
+  } else {
+    console.warn('[Chat] ⚠️ No preferences provided! preferences =', JSON.stringify(preferences, null, 2));
   }
   
   const res = await fetch(`${base}/api/chat`, {
@@ -144,6 +156,14 @@ export default function Chat({ pendingMessage, onPendingMessageSent, onShowDashb
   const quickReplies = ['Plan a trip to Paris', 'Budget accommodations', 'Check weather'];
 
   const handleOnboardingComplete = (preferences) => {
+    console.log('[Chat] handleOnboardingComplete received:', JSON.stringify(preferences, null, 2));
+    console.log('[Chat] Setting userPreferences to:', preferences);
+    console.log('[Chat] Preferences object structure:', {
+      hasPreferences: !!preferences?.preferences,
+      budget: preferences?.preferences?.budget,
+      quality: preferences?.preferences?.quality,
+      convenience: preferences?.preferences?.convenience
+    });
     setUserPreferences(preferences);
     setOnboardingComplete(true);
     // Note: We don't save to localStorage so the form shows every time the user visits
@@ -490,6 +510,53 @@ export default function Chat({ pendingMessage, onPendingMessageSent, onShowDashb
           console.log('API Response:', data);
           const reply = data.reply || '';
           setMessages((prev) => [...prev, { role: 'assistant', content: reply, timestamp: new Date().toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' }) }]);
+          
+          // Save optimalFlight to tripState if available in amadeus_data
+          // Backend returns amadeus_data with outboundFlights and returnFlights
+          const flightData = data.dashboardData || data.amadeus_data;
+          if (flightData) {
+            const { outboundFlights, returnFlights } = flightData;
+            const optimalOutbound = outboundFlights?.find(f => f.optimalFlight);
+            const optimalReturn = returnFlights?.find(f => f.optimalFlight);
+            
+            if (optimalOutbound || optimalReturn) {
+              const optimalFlight = optimalOutbound || optimalReturn;
+              
+              // Save optimal flight to tripState
+              recordTripSelection('flight', optimalFlight, {
+                route: flightData.route,
+                preferenceWeights: userPreferences?.preferences || null
+              });
+              
+              // Update tripState with optimalFlight
+              const currentState = loadTripState();
+              saveTripState({
+                ...currentState,
+                optimalFlight: optimalFlight
+              });
+              
+              console.log('[Chat] Saved optimalFlight to tripState:', JSON.stringify(optimalFlight, null, 2));
+              console.log('[Chat] Optimal flight details:', {
+                flightNumber: optimalFlight.flightNumber,
+                airline: optimalFlight.airline,
+                price: optimalFlight.price,
+                score: optimalFlight.preferenceScore,
+                stops: optimalFlight.stops,
+                duration: optimalFlight.duration
+              });
+              console.log('[Chat] Optimal flight preference score:', optimalFlight.preferenceScore);
+              console.log('[Chat] Current preferences:', JSON.stringify(userPreferences?.preferences, null, 2));
+            } else {
+              console.log('[Chat] No optimalFlight found in response. Available flights:', {
+                outboundCount: outboundFlights?.length || 0,
+                returnCount: returnFlights?.length || 0,
+                firstOutbound: outboundFlights?.[0]?.flightNumber,
+                firstReturn: returnFlights?.[0]?.flightNumber
+              });
+            }
+          } else {
+            console.log('[Chat] No flight data in response:', Object.keys(data));
+          }
         } catch (e) {
           console.error('API Error:', e);
           setError('Something went wrong. Please try again.');

@@ -7,6 +7,7 @@ import Home from './pages/Home';
 import Chat from './pages/Chat';
 import OptimizedItinerary from './pages/OptimizedItinerary';
 import { FlightDashboard } from './components/dashboard/FlightDashboard';
+import { recordTripSelection, loadTripState, saveTripState } from './utils/tripState';
 
 function App() {
   const [showDashboard, setShowDashboard] = useState(false);
@@ -19,6 +20,32 @@ function App() {
     console.log('App.js route data:', data?.route);
     setDashboardData(data);
     setShowDashboard(true);
+    
+    // Save optimalFlight to tripState if available
+    if (data) {
+      const { outboundFlights, returnFlights } = data;
+      const optimalOutbound = outboundFlights?.find(f => f.optimalFlight);
+      const optimalReturn = returnFlights?.find(f => f.optimalFlight);
+      
+      if (optimalOutbound || optimalReturn) {
+        const optimalFlight = optimalOutbound || optimalReturn;
+        
+        // Save optimal flight to tripState
+        recordTripSelection('flight', optimalFlight, {
+          route: data.route,
+          preferenceWeights: data.preferences?.preferences || null
+        });
+        
+        // Update tripState with optimalFlight
+        const currentState = loadTripState();
+        saveTripState({
+          ...currentState,
+          optimalFlight: optimalFlight
+        });
+        
+        console.log('[App] Saved optimalFlight to tripState:', optimalFlight);
+      }
+    }
   };
 
   // Function to hide dashboard and return to chat
