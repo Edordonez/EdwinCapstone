@@ -1,9 +1,9 @@
 import React, { useMemo, useRef, useState, useEffect } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useLocation } from 'react-router-dom';
 import MessageBubble from '../components/MessageBubble';
 import ChatInput from '../components/ChatInput';
 import TripPreferencesForm from '../components/TripPreferencesForm';
-import { recordTripSelection, loadTripState, saveTripState, updateTripRoute } from '../utils/tripState';
+import { recordTripSelection, loadTripState, saveTripState, updateTripRoute, loadCurrentItinerary, loadConversation, saveConversation, clearConversation, recordMustDoActivities, selectOutboundFlight, selectReturnFlight } from '../utils/tripState';
 
 // Helper function to convert date string to ISO format (YYYY-MM-DD)
 const formatDateToISO = (dateStr) => {
@@ -81,11 +81,11 @@ async function getLocationContext() {
           user_location.country = countryName;
         }
       } catch (e) {
-        console.log('Reverse geocoding failed:', e);
+        // Silently fail - location is optional
       }
     }
   } catch (e) {
-    console.log('Location detection failed:', e);
+    // Silently fail - location is optional
   }
   
   return {
@@ -121,12 +121,7 @@ async function sendToApi(messages, context, sessionId, preferences = null) {
   const base = isLocalhost 
     ? 'http://localhost:8000'  // Force localhost for local development
     : (process.env.REACT_APP_API_BASE || 'http://localhost:8000');
-  console.log('API Base URL:', base);
-  console.log('Making request to:', `${base}/api/chat`);
-  
   const cleanedContext = cleanContext(context);
-  console.log('Cleaned context:', cleanedContext);
-  console.log('User preferences:', preferences);
   
   // Include preferences in request if available
   const requestBody = {
@@ -137,15 +132,7 @@ async function sendToApi(messages, context, sessionId, preferences = null) {
   
   if (preferences && preferences.preferences) {
     requestBody.preferences = preferences.preferences;
-    console.log('[Chat] Sending preferences to API:', JSON.stringify(preferences.preferences, null, 2));
-    console.log('[Chat] Preferences values:', {
-      budget: preferences.preferences.budget,
-      quality: preferences.preferences.quality,
-      convenience: preferences.preferences.convenience
-    });
-    console.log('[Chat] Budget weight:', preferences.preferences.budget);
-    console.log('[Chat] Quality weight:', preferences.preferences.quality);
-    console.log('[Chat] Convenience weight:', preferences.preferences.convenience);
+    // Preferences are being sent to API
   } else {
     console.warn('[Chat] ⚠️ No preferences provided! preferences =', JSON.stringify(preferences, null, 2));
   }
@@ -161,28 +148,23 @@ async function sendToApi(messages, context, sessionId, preferences = null) {
 
 export default function Chat({ pendingMessage, onPendingMessageSent, onShowDashboard, showDashboard, dashboardData, onHideDashboard }) {
   const navigate = useNavigate();
+  const location = useLocation();
   const [messages, setMessages] = useState([]);
   const [isTyping, setIsTyping] = useState(false);
   const [error, setError] = useState(null);
   const [context, setContext] = useState(null);
   const [, setIsLoadingContext] = useState(true);
   const [sessionId, setSessionId] = useState(null);
-  const [onboardingComplete, setOnboardingComplete] = useState(false);
+  // If coming from Back to Results, skip preference form immediately
+  const [onboardingComplete, setOnboardingComplete] = useState(location.state?.restoreConversation || false);
   const [userPreferences, setUserPreferences] = useState(null);
+  const [hasExistingItinerary, setHasExistingItinerary] = useState(location.state?.hasExistingItinerary || false);
   const scrollRef = useRef(null);
   const pendingMessageSentRef = useRef(false);
 
   const quickReplies = ['Plan a trip to Paris', 'Budget accommodations', 'Check weather'];
 
   const handleOnboardingComplete = (preferences) => {
-    console.log('[Chat] handleOnboardingComplete received:', JSON.stringify(preferences, null, 2));
-    console.log('[Chat] Setting userPreferences to:', preferences);
-    console.log('[Chat] Preferences object structure:', {
-      hasPreferences: !!preferences?.preferences,
-      budget: preferences?.preferences?.budget,
-      quality: preferences?.preferences?.quality,
-      convenience: preferences?.preferences?.convenience
-    });
     setUserPreferences(preferences);
     setOnboardingComplete(true);
     // Note: We don't save to localStorage so the form shows every time the user visits
@@ -192,6 +174,80 @@ export default function Chat({ pendingMessage, onPendingMessageSent, onShowDashb
   useEffect(() => {
     const initializeChat = async () => {
       try {
+        // Detect if this is a refresh (reload) or navigation (back/forward/new)
+        const navigationEntry = performance.getEntriesByType('navigation')[0];
+        const isRefresh = navigationEntry && navigationEntry.type === 'reload';
+        
+        // If refresh, clear saved conversation and start fresh
+        if (isRefresh) {
+          console.log('Refresh detected - clearing saved conversation');
+          clearConversation();
+        }
+        
+        // Check if we should restore conversation (from Back to Results flow)
+        const shouldRestore = location.state?.restoreConversation || false;
+        const hasItinerary = location.state?.hasExistingItinerary || false;
+        
+        if (hasItinerary) {
+          setHasExistingItinerary(true);
+        }
+        
+        // If Back to Results was clicked, skip preference form and restore saved conversation
+        if (shouldRestore && !isRefresh) {
+          // Always skip preference form when coming from Back to Results
+          setOnboardingComplete(true);
+          
+          const savedConv = loadConversation();
+          
+          if (savedConv && savedConv.messages && savedConv.messages.length > 0) {
+            console.log('Restoring saved conversation:', savedConv.messages.length, 'messages');
+            // Restore saved conversation
+            setMessages(savedConv.messages);
+            if (savedConv.sessionId) {
+              setSessionId(savedConv.sessionId);
+            }
+            if (savedConv.context) {
+              setContext(savedConv.context);
+            }
+            if (savedConv.userPreferences) {
+              setUserPreferences(savedConv.userPreferences);
+            }
+            setIsLoadingContext(false);
+            return; // Don't initialize new chat if restoring saved conversation
+          } else {
+            // No saved conversation, but still skip preference form (user wants to edit itinerary)
+            console.log('Back to Results: No saved conversation, but skipping preference form');
+            // Initialize chat with welcome message for continuing itinerary
+            const locationContext = await getLocationContext();
+            setContext(locationContext);
+            
+            // Generate session ID for cache continuity
+            const newSessionId = `session_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+            setSessionId(newSessionId);
+            
+            // Create welcome message
+            let welcomeMessage = "Hi! I'm Miles, your AI travel assistant. I'm here to help you plan the perfect trip.";
+            
+            if (locationContext.user_location.city && locationContext.user_location.country) {
+              welcomeMessage += ` I can see you're in ${locationContext.user_location.city}, ${locationContext.user_location.country}.`;
+            } else if (locationContext.user_location.country) {
+              welcomeMessage += ` I can see you're in ${locationContext.user_location.country}.`;
+            }
+            
+            welcomeMessage += " You can continue building your itinerary. What would you like to add?";
+            
+            setMessages([{
+              role: 'assistant',
+              content: welcomeMessage,
+              timestamp: new Date().toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' })
+            }]);
+            
+            setIsLoadingContext(false);
+            return; // Don't continue to normal initialization
+          }
+        }
+        
+        // No saved conversation - initialize new chat
         const locationContext = await getLocationContext();
         setContext(locationContext);
         
@@ -229,6 +285,15 @@ export default function Chat({ pendingMessage, onPendingMessageSent, onShowDashb
     
     initializeChat();
   }, []);
+  
+  // Auto-save conversation whenever messages change (for Back to Results flow)
+  useEffect(() => {
+    // Save conversation only if there are messages (not just welcome message)
+    if (messages.length > 1 && sessionId) {
+      saveConversation(messages, sessionId, context, userPreferences);
+      console.log('Auto-saved conversation:', messages.length, 'messages');
+    }
+  }, [messages, sessionId, context, userPreferences]);
 
   useEffect(() => {
     if (scrollRef.current) {
@@ -279,12 +344,9 @@ export default function Chat({ pendingMessage, onPendingMessageSent, onShowDashb
     datePatterns.forEach(pattern => {
       const found = lowerMessage.match(pattern);
       if (found) {
-        console.log('Date pattern matched:', pattern, 'Found:', found);
         matches.push(...found);
       }
     });
-    
-    console.log('All date matches:', matches);
     
     if (matches.length > 0) {
       // Parse the first date as departure
@@ -463,25 +525,20 @@ export default function Chat({ pendingMessage, onPendingMessageSent, onShowDashb
     for (const pattern of routePatterns) {
       const match = lowerMessage.match(pattern);
       if (match) {
-        console.log('Pattern matched:', pattern, 'Match:', match[0]);
         const parts = match[0].split(/\s+to\s+/i);
-        console.log('Split parts:', parts);
         
         if (parts.length >= 2) {
           const originPart = parts[0].replace(/^(from|flights?)\s+/i, '').trim();
           const destPart = parts[1].trim();
           
-          console.log('Origin part:', originPart, 'Dest part:', destPart);
           
           // Try to find cities in the mappings
           for (const [key, value] of Object.entries(cityMappings)) {
             if (originPart.includes(key)) {
               origin = value;
-              console.log('Found origin:', key, '->', value);
             }
             if (destPart.includes(key)) {
               destination = value;
-              console.log('Found destination:', key, '->', value);
             }
           }
           
@@ -505,14 +562,37 @@ export default function Chat({ pendingMessage, onPendingMessageSent, onShowDashb
       }
     }
     
-    console.log('City extraction debug:', {
-      message: lowerMessage,
-      origin,
-      destination,
-      foundCities: !origin || !destination ? Object.keys(cityMappings).filter(key => lowerMessage.includes(key)) : []
+    
+    // Extract dates from message if not already extracted
+    let departureDate = null;
+    let returnDate = null;
+    
+    // Look for date patterns
+    const datePatterns = [
+      /(january|february|march|april|may|june|july|august|september|october|november|december)\s+(\d{1,2})(?:st|nd|rd|th)?/gi,
+      /(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\s+(\d{1,2})(?:st|nd|rd|th)?/gi,
+      /(\d{1,2})\s+(january|february|march|april|may|june|july|august|september|october|november|december)/gi,
+      /(\d{1,2})\s+(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)/gi,
+      /(\d{1,2}\/\d{1,2}\/\d{4})/g,
+      /(\d{4}-\d{2}-\d{2})/g
+    ];
+    
+    const dateMatches = [];
+    datePatterns.forEach(pattern => {
+      const matches = lowerMessage.match(pattern);
+      if (matches) {
+        dateMatches.push(...matches);
+      }
     });
     
-    return { origin, destination };
+    if (dateMatches.length > 0) {
+      departureDate = dateMatches[0];
+      if (dateMatches.length > 1) {
+        returnDate = dateMatches[1];
+      }
+    }
+    
+    return { origin, destination, departureDate, returnDate };
   };
 
 
@@ -522,11 +602,440 @@ export default function Chat({ pendingMessage, onPendingMessageSent, onShowDashb
     setMessages((prev) => [...prev, userMsg]);
     setError(null);
     setIsTyping(true);
-        try {
+    
+    // Check for must-do activities in user message
+    const textLower = text.toLowerCase();
+    const mustDoPatterns = [
+      /(?:하고\s*싶어|하고\s*싶다|하고\s*싶습니다)/i, // Korean: 하고 싶어
+      /(?:want\s+to\s+do|want\s+to\s+visit|want\s+to\s+see|want\s+to\s+go\s+to)/i,
+      /(?:add\s+)([^to]+?)(?:\s+to\s+itinerary|\s+to\s+my\s+itinerary|$)/i,
+      /(?:I\s+want\s+)([^\.]+?)(?:\.|$)/i,
+      /(?:visit|see|do|tour|explore)\s+([A-Z][a-zA-Z\s]+?)(?:\s+하고\s*싶어|\s+하고\s*싶다|\.|$)/i
+    ];
+    
+    let detectedActivities = [];
+    for (const pattern of mustDoPatterns) {
+      const match = text.match(pattern);
+      if (match) {
+        // Extract activity name from match
+        let activityName = match[1] || match[0];
+        
+        // Clean up activity name
+        activityName = activityName
+          .replace(/하고\s*싶어|하고\s*싶다|하고\s*싶습니다/gi, '')
+          .replace(/want\s+to\s+do|want\s+to\s+visit|want\s+to\s+see|want\s+to\s+go\s+to/gi, '')
+          .replace(/add\s+/gi, '')
+          .replace(/to\s+itinerary|to\s+my\s+itinerary/gi, '')
+          .replace(/I\s+want\s+/gi, '')
+          .replace(/visit|see|do|tour|explore/gi, '')
+          .trim();
+        
+        // Remove common stop words
+        activityName = activityName
+          .replace(/^(the|a|an)\s+/i, '')
+          .trim();
+        
+        if (activityName && activityName.length > 2) {
+          detectedActivities.push({
+            name: activityName,
+            description: `User requested: ${activityName}`,
+            category: 'general',
+            duration: '2-3 hours'
+          });
+        }
+      }
+    }
+    
+    // If no pattern matched, try to extract activity name directly
+    if (detectedActivities.length === 0) {
+      // Look for capitalized words or common activity patterns
+      const activityNameMatch = text.match(/([A-Z][a-zA-Z\s]+?)(?:\s+하고\s*싶어|\s+하고\s*싶다|$)/);
+      if (activityNameMatch && activityNameMatch[1].length > 3) {
+        detectedActivities.push({
+          name: activityNameMatch[1].trim(),
+          description: `User requested: ${activityNameMatch[1].trim()}`,
+          category: 'general',
+          duration: '2-3 hours'
+        });
+      }
+    }
+    
+    // Save must-do activities if detected
+    if (detectedActivities.length > 0) {
+      console.log('Detected must-do activities:', detectedActivities);
+      recordMustDoActivities(detectedActivities);
+    }
+    
+    // Check if user is requesting itinerary generation (explicit request)
+    const isItineraryRequest = textLower.includes('generate itinerary') || 
+                               textLower.includes('generate itineary') ||
+                               textLower.includes('create itinerary') ||
+                               textLower.includes('make itinerary') ||
+                               textLower.includes('plan itinerary') ||
+                               textLower.includes('show itinerary') ||
+                               (textLower.includes('itinerary') && (textLower.includes('from') || textLower.includes('to')));
+    
+    // Check if user wants to add to existing itinerary
+    const isAddToItinerary = textLower.includes('add to itinerary') || 
+                            textLower.includes('add to itineary') ||
+                            textLower.includes('update itinerary') ||
+                            textLower.includes('back to itinerary') ||
+                            textLower.includes('return to itinerary') ||
+                            textLower.includes('go back to itinerary') ||
+                            hasExistingItinerary; // If we have existing itinerary, treat as add to itinerary
+    
+    // Check if user is confirming itinerary creation (yes/ok response to assistant's question)
+    const isAffirmativeResponse = /^(yes|yeah|yep|yup|ok|okay|sure|please|do it|go ahead|create it|make it|show me|let's do it)$/i.test(text.trim());
+    
+    // Check if previous assistant message was asking about creating itinerary
+    const previousAssistantMsg = messages.length > 0 
+      ? messages.filter(m => m.role === 'assistant').slice(-1)[0]?.content?.toLowerCase() || ''
+      : '';
+    const isAssistantAskingForItinerary = previousAssistantMsg.includes('itinerary') && 
+                                          (previousAssistantMsg.includes('create') || 
+                                           previousAssistantMsg.includes('would you like') ||
+                                           previousAssistantMsg.includes('create a detailed'));
+    
+    // If user says yes/ok to itinerary question, skip API call and go directly to itinerary page
+    const shouldNavigateToItinerary = isItineraryRequest || (isAffirmativeResponse && isAssistantAskingForItinerary);
+    
+    try {
+          // If user is confirming itinerary creation, skip API call and navigate directly
+          if (isAffirmativeResponse && isAssistantAskingForItinerary && !isItineraryRequest) {
+            console.log('User confirmed itinerary creation - navigating directly to itinerary page');
+            setIsTyping(false);
+            // Small delay to ensure UI updates
+            setTimeout(() => {
+              // Extract route info from previous messages
+              const allMessages = [...messages, userMsg];
+              const tripState = loadTripState();
+              let extractedRoute = null;
+              
+              // Look through previous messages to find route info
+              console.log('=== Extracting route from messages ===');
+              console.log('All messages:', allMessages.map(m => ({ role: m.role, content: m.content?.substring(0, 100) })));
+              
+              // Helper function to extract departure from message
+              const extractDepartureFromMessage = (msgContent) => {
+                if (!msgContent) return null;
+                
+                // Try "from X to Y" pattern
+                const fromToPattern = /from\s+([^to]+?)\s+to\s+([^\n,]+?)(?:\s+from|\s+to|\s+on|\s+,\s|$)/i;
+                const fromToMatch = msgContent.match(fromToPattern);
+                if (fromToMatch) {
+                  return fromToMatch[1].trim().replace(/\.$/, '').trim();
+                }
+                
+                // Try "flights from X to Y" pattern
+                const flightsPattern = /flights?\s+from\s+([^to]+?)\s+to\s+([^\n,]+?)(?:\s+from|\s+to|\s+on|\s+,\s|$)/i;
+                const flightsMatch = msgContent.match(flightsPattern);
+                if (flightsMatch) {
+                  return flightsMatch[1].trim().replace(/\.$/, '').trim();
+                }
+                
+                return null;
+              };
+              
+              for (let i = allMessages.length - 1; i >= 0; i--) {
+                const msg = allMessages[i];
+                const content = msg.content || '';
+                
+                // Try to extract departure from this message
+                let extractedDeparture = extractDepartureFromMessage(content);
+                
+                // Check for patterns like "activities in Barcelona from Nov 20 to Nov 27"
+                // or "Top activities in Barcelona from Nov 20 to Nov 27"
+                const activityPattern = /(?:top|best|activities?|things to do|what to do)\s+(?:in|at|for)?\s+([A-Za-z\s]+?)\s+(?:from|between)\s+([A-Za-z]+\s+\d{1,2})\s+(?:to|until|-|–)\s+([A-Za-z]+\s+\d{1,2})/i;
+                const activityMatch = content.match(activityPattern);
+                
+                if (activityMatch) {
+                  const destination = activityMatch[1].trim();
+                  const startDate = activityMatch[2].trim();
+                  const endDate = activityMatch[3].trim();
+                  
+                  console.log('Found activity pattern match:', { destination, startDate, endDate });
+                  
+                  extractedRoute = {
+                    destination: destination,
+                    departure: extractedDeparture || tripState?.origin || null,
+                    departureCode: tripState?.originCode || '',
+                    destinationCode: tripState?.destinationCode || '',
+                    date: startDate,
+                    returnDate: endDate
+                  };
+                  break;
+                }
+                
+                // Also check assistant messages for destination mentions
+                if (msg.role === 'assistant') {
+                  // Pattern: "for your trip to Barcelona from November 20 to November 27"
+                  const tripPattern = /(?:trip|visit|travel)\s+to\s+([A-Za-z\s]+?)\s+(?:from|between)\s+([A-Za-z]+\s+\d{1,2})(?:\s+to|\s+until|-|–)\s+([A-Za-z]+\s+\d{1,2})/i;
+                  const tripMatch = content.match(tripPattern);
+                  
+                  if (tripMatch) {
+                    const destination = tripMatch[1].trim();
+                    const startDate = tripMatch[2].trim();
+                    const endDate = tripMatch[3].trim();
+                    
+                    console.log('Found trip pattern match:', { destination, startDate, endDate });
+                    
+                    extractedRoute = {
+                      destination: destination,
+                      departure: extractedDeparture || tripState?.origin || null,
+                      departureCode: tripState?.originCode || '',
+                      destinationCode: tripState?.destinationCode || '',
+                      date: startDate,
+                      returnDate: endDate
+                    };
+                    break;
+                  }
+                  
+                  // Try simpler patterns: "Barcelona from Nov 20 to Nov 27" or "in Barcelona"
+                  const simpleCityPattern = /\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)\s+(?:from|between)\s+([A-Za-z]+\s+\d{1,2})\s+(?:to|until|-|–)\s+([A-Za-z]+\s+\d{1,2})/i;
+                  const simpleCityMatch = content.match(simpleCityPattern);
+                  
+                  if (simpleCityMatch && !extractedRoute) {
+                    const destination = simpleCityMatch[1].trim();
+                    const startDate = simpleCityMatch[2].trim();
+                    const endDate = simpleCityMatch[3].trim();
+                    
+                    console.log('Found simple city pattern match:', { destination, startDate, endDate });
+                    
+                    extractedRoute = {
+                      destination: destination,
+                      departure: extractedDeparture || tripState?.origin || null,
+                      departureCode: tripState?.originCode || '',
+                      destinationCode: tripState?.destinationCode || '',
+                      date: startDate,
+                      returnDate: endDate
+                    };
+                  }
+                }
+              }
+              
+              // If we still don't have departure, try to extract from all messages
+              if (extractedRoute && !extractedRoute.departure) {
+                for (let i = allMessages.length - 1; i >= 0; i--) {
+                  const msg = allMessages[i];
+                  if (msg.role === 'user') {
+                    const extractedDeparture = extractDepartureFromMessage(msg.content);
+                    if (extractedDeparture) {
+                      extractedRoute.departure = extractedDeparture;
+                      console.log('Extracted departure from user message:', extractedDeparture);
+                      break;
+                    }
+                  }
+                }
+              }
+              
+              console.log('Extracted route:', extractedRoute);
+              
+              // Use extracted route or fall back to tripState
+              const routeInfo = extractedRoute || tripState?.route || {};
+              
+              // If we have extracted route info, save it to tripState first
+              if (extractedRoute && extractedRoute.destination && extractedRoute.date) {
+                // Update tripState with extracted route info
+                const formatDateToISO = (dateStr) => {
+                  if (!dateStr) return null;
+                  try {
+                    const date = new Date(dateStr);
+                    if (!isNaN(date.getTime())) {
+                      return date.toISOString().split('T')[0];
+                    }
+                  } catch (e) {
+                    // Try to parse month name format
+                    const monthNames = {
+                      'january': 0, 'february': 1, 'march': 2, 'april': 3, 'may': 4, 'june': 5,
+                      'july': 6, 'august': 7, 'september': 8, 'october': 9, 'november': 10, 'december': 11,
+                      'jan': 0, 'feb': 1, 'mar': 2, 'apr': 3, 'may': 4, 'jun': 5,
+                      'jul': 6, 'aug': 7, 'sep': 8, 'oct': 9, 'nov': 10, 'dec': 11
+                    };
+                    const dateMatch = dateStr.match(/(january|february|march|april|may|june|july|august|september|october|november|december|jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\s+(\d{1,2})/i);
+                    if (dateMatch) {
+                      const month = monthNames[dateMatch[1].toLowerCase()];
+                      const day = parseInt(dateMatch[2]);
+                      const currentYear = new Date().getFullYear();
+                      const date = new Date(currentYear, month, day);
+                      // If date is in the past, use next year
+                      if (date < new Date()) {
+                        date.setFullYear(currentYear + 1);
+                      }
+                      return date.toISOString().split('T')[0];
+                    }
+                  }
+                  return null;
+                };
+                
+                // Extract departure from messages if not in extractedRoute
+                let finalDeparture = extractedRoute.departure;
+                if (!finalDeparture) {
+                  // Try to extract from all messages
+                  for (let i = allMessages.length - 1; i >= 0; i--) {
+                    const msg = allMessages[i];
+                    if (msg.role === 'user') {
+                      const fromToPattern = /from\s+([^to]+?)\s+to\s+([^\n,]+?)(?:\s+from|\s+to|\s+on|\s+,\s|$)/i;
+                      const fromToMatch = msg.content?.match(fromToPattern);
+                      if (fromToMatch) {
+                        finalDeparture = fromToMatch[1].trim().replace(/\.$/, '').trim();
+                        console.log('Extracted departure from user message:', finalDeparture);
+                        break;
+                      }
+                    }
+                  }
+                }
+                
+                // Normalize departure city name (e.g., "washington dc" -> "Washington DC")
+                if (finalDeparture) {
+                  const cityMappings = {
+                    'washington dc': 'Washington DC',
+                    'washington': 'Washington DC',
+                    'dc': 'Washington DC',
+                    'new york': 'New York',
+                    'nyc': 'New York',
+                    'los angeles': 'Los Angeles',
+                    'lax': 'Los Angeles'
+                  };
+                  const normalized = cityMappings[finalDeparture.toLowerCase()] || finalDeparture;
+                  finalDeparture = normalized;
+                }
+                
+                // Ensure we have a departure value - don't pass null
+                const departureToSave = finalDeparture || tripState?.origin;
+                
+                console.log('=== Chat.jsx: Saving to tripState ===');
+                console.log('finalDeparture:', finalDeparture);
+                console.log('tripState?.origin:', tripState?.origin);
+                console.log('departureToSave:', departureToSave);
+                console.log('extractedRoute.destination:', extractedRoute.destination);
+                
+                if (departureToSave) {
+                  updateTripRoute({
+                    departure: departureToSave,
+                    destination: extractedRoute.destination,
+                    departureCode: extractedRoute.departureCode || tripState?.originCode || '',
+                    destinationCode: extractedRoute.destinationCode || tripState?.destinationCode || '',
+                    date: formatDateToISO(extractedRoute.date),
+                    returnDate: extractedRoute.returnDate ? formatDateToISO(extractedRoute.returnDate) : null
+                  });
+                  console.log('Updated tripState with departure:', departureToSave);
+                } else {
+                  console.warn('No departure found - not updating tripState.origin');
+                }
+              }
+              
+              // If we have extracted route, pass it directly to handleGenerateItinerary
+              // by creating a special routeInfo object that will be used directly
+              if (extractedRoute && extractedRoute.destination && extractedRoute.date) {
+                // Format dates properly for routeInfo
+                const formatDateForRouteInfo = (dateStr) => {
+                  if (!dateStr) return null;
+                  
+                  // If already in "Nov 20, 2025" format, return as is
+                  if (dateStr.match(/[A-Za-z]+\s+\d{1,2},?\s+\d{4}/)) {
+                    return dateStr;
+                  }
+                  
+                  // If in "Nov 20" format (no year), add current or next year
+                  const monthDayPattern = /([A-Za-z]+)\s+(\d{1,2})/;
+                  const monthDayMatch = dateStr.match(monthDayPattern);
+                  if (monthDayMatch) {
+                    const monthNames = {
+                      'january': 0, 'february': 1, 'march': 2, 'april': 3, 'may': 4, 'june': 5,
+                      'july': 6, 'august': 7, 'september': 8, 'october': 9, 'november': 10, 'december': 11,
+                      'jan': 0, 'feb': 1, 'mar': 2, 'apr': 3, 'may': 4, 'jun': 5,
+                      'jul': 6, 'aug': 7, 'sep': 8, 'oct': 9, 'nov': 10, 'dec': 11
+                    };
+                    const month = monthNames[monthDayMatch[1].toLowerCase()];
+                    const day = parseInt(monthDayMatch[2]);
+                    const currentYear = new Date().getFullYear();
+                    const testDate = new Date(currentYear, month, day);
+                    const year = testDate < new Date() ? currentYear + 1 : currentYear;
+                    return `${monthDayMatch[1]} ${day}, ${year}`;
+                  }
+                  
+                  // Try to parse as Date object
+                  try {
+                    const date = new Date(dateStr);
+                    if (!isNaN(date.getTime())) {
+                      return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+                    }
+                  } catch (e) {
+                    // Return as is if parsing fails
+                    return dateStr;
+                  }
+                  return dateStr;
+                };
+                
+                // Extract departure from messages if not in extractedRoute
+                let finalDepartureForNav = extractedRoute.departure;
+                if (!finalDepartureForNav) {
+                  // Try to extract from all messages
+                  for (let i = allMessages.length - 1; i >= 0; i--) {
+                    const msg = allMessages[i];
+                    if (msg.role === 'user') {
+                      const fromToPattern = /from\s+([^to]+?)\s+to\s+([^\n,]+?)(?:\s+from|\s+to|\s+on|\s+,\s|$)/i;
+                      const fromToMatch = msg.content?.match(fromToPattern);
+                      if (fromToMatch) {
+                        finalDepartureForNav = fromToMatch[1].trim().replace(/\.$/, '').trim();
+                        break;
+                      }
+                    }
+                  }
+                }
+                
+                const routeInfoForNav = {
+                  departure: finalDepartureForNav || tripState?.origin || null,
+                  destination: extractedRoute.destination,
+                  departureCode: extractedRoute.departureCode || tripState?.originCode || '',
+                  destinationCode: extractedRoute.destinationCode || tripState?.destinationCode || '',
+                  date: formatDateForRouteInfo(extractedRoute.date),
+                  returnDate: extractedRoute.returnDate ? formatDateForRouteInfo(extractedRoute.returnDate) : null
+                };
+                
+                // Navigate directly with routeInfo instead of parsing message
+                const existingItinerary = loadCurrentItinerary();
+                navigate('/itinerary', {
+                  state: {
+                    routeInfo: routeInfoForNav,
+                    flights: [],
+                    outboundFlights: [],
+                    returnFlights: [],
+                    preferences: userPreferences ? { preferences: userPreferences } : null,
+                    updateExistingItinerary: false,
+                    existingItineraryData: null
+                  }
+                });
+                return;
+              }
+              
+              // Fallback: Construct a message for handleGenerateItinerary
+              let messageForItinerary = '';
+              
+              if (routeInfo.destination && routeInfo.date) {
+                // Use routeInfo if available
+                if (routeInfo.returnDate) {
+                  messageForItinerary = `Create itinerary to ${routeInfo.destination} from ${routeInfo.date} to ${routeInfo.returnDate}`;
+                } else {
+                  messageForItinerary = `Create itinerary to ${routeInfo.destination} on ${routeInfo.date}`;
+                }
+              } else {
+                // Try to get from previous user messages (like "Top activities in Barcelona from Nov 20 to Nov 27")
+                const prevUserMsg = messages.filter(m => m.role === 'user').slice(-1)[0]?.content || '';
+                if (prevUserMsg && (prevUserMsg.toLowerCase().includes('activities') || prevUserMsg.toLowerCase().includes('itinerary'))) {
+                  messageForItinerary = prevUserMsg;
+                } else {
+                  messageForItinerary = `Create itinerary`;
+                }
+              }
+              
+              handleGenerateItinerary(messageForItinerary);
+            }, 300);
+            return;
+          }
+          
           const payload = [...messages, userMsg];
-          console.log('Sending to API:', { payload, context, sessionId, preferences: userPreferences });
           const data = await sendToApi(payload, context, sessionId, userPreferences);
-          console.log('API Response:', data);
           const reply = data.reply || '';
           setMessages((prev) => [...prev, { role: 'assistant', content: reply, timestamp: new Date().toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' }) }]);
           
@@ -534,14 +1043,58 @@ export default function Chat({ pendingMessage, onPendingMessageSent, onShowDashb
           // Backend returns amadeus_data with outboundFlights and returnFlights
           const flightData = data.dashboardData || data.amadeus_data;
           if (flightData) {
-            const { outboundFlights, returnFlights } = flightData;
-            const optimalOutbound = outboundFlights?.find(f => f.optimalFlight);
-            const optimalReturn = returnFlights?.find(f => f.optimalFlight);
+            const { outboundFlights, returnFlights, activities } = flightData;
+            const optimalOutbound = outboundFlights?.find(f => f.optimalFlight || f.isOptimal);
+            const optimalReturn = returnFlights?.find(f => f.optimalFlight || f.isOptimal);
+            
+            // Update must-do activities with full details from API response
+            if (detectedActivities.length > 0 && activities && Array.isArray(activities)) {
+              const updatedActivities = detectedActivities.map(detected => {
+                // Try to find matching activity in API response by name
+                const matchingActivity = activities.find(apiAct => {
+                  const apiName = (apiAct.name || apiAct.title || '').toLowerCase().trim();
+                  const detectedName = (detected.name || '').toLowerCase().trim();
+                  return apiName === detectedName || 
+                         apiName.includes(detectedName) || 
+                         detectedName.includes(apiName);
+                });
+                
+                if (matchingActivity) {
+                  // Merge detected activity with API activity details
+                  return {
+                    ...detected,
+                    name: matchingActivity.name || matchingActivity.title || detected.name,
+                    description: matchingActivity.description || detected.description,
+                    duration: matchingActivity.duration || detected.duration,
+                    rating: matchingActivity.rating || detected.rating,
+                    price: matchingActivity.price || detected.price,
+                    category: matchingActivity.category || matchingActivity.type || detected.category,
+                    location: matchingActivity.location || detected.location,
+                    bookingLink: matchingActivity.bookingLink || matchingActivity.booking_link || detected.bookingLink
+                  };
+                }
+                return detected;
+              });
+              
+              // Update must-do activities with full details
+              recordMustDoActivities(updatedActivities);
+              console.log('Updated must-do activities with API details:', updatedActivities);
+            }
+            
+            // Save selected flights to tripState
+            if (optimalOutbound) {
+              selectOutboundFlight(optimalOutbound);
+              console.log('Saved selected outbound flight from API response:', optimalOutbound.flightNumber);
+            }
+            if (optimalReturn) {
+              selectReturnFlight(optimalReturn);
+              console.log('Saved selected return flight from API response:', optimalReturn.flightNumber);
+            }
             
             if (optimalOutbound || optimalReturn) {
               const optimalFlight = optimalOutbound || optimalReturn;
               
-              // Save optimal flight to tripState
+              // Save optimal flight to tripState (for backward compatibility)
               recordTripSelection('flight', optimalFlight, {
                 route: flightData.route,
                 preferenceWeights: userPreferences?.preferences || null
@@ -559,34 +1112,34 @@ export default function Chat({ pendingMessage, onPendingMessageSent, onShowDashb
                 });
               }
               
-              // Update tripState with optimalFlight
+              // Update tripState with optimalFlight (for backward compatibility)
               const currentState = loadTripState();
               saveTripState({
                 ...currentState,
                 optimalFlight: optimalFlight
               });
               
-              console.log('[Chat] Saved optimalFlight to tripState:', JSON.stringify(optimalFlight, null, 2));
-              console.log('[Chat] Optimal flight details:', {
-                flightNumber: optimalFlight.flightNumber,
-                airline: optimalFlight.airline,
-                price: optimalFlight.price,
-                score: optimalFlight.preferenceScore,
-                stops: optimalFlight.stops,
-                duration: optimalFlight.duration
-              });
-              console.log('[Chat] Optimal flight preference score:', optimalFlight.preferenceScore);
-              console.log('[Chat] Current preferences:', JSON.stringify(userPreferences?.preferences, null, 2));
-            } else {
-              console.log('[Chat] No optimalFlight found in response. Available flights:', {
-                outboundCount: outboundFlights?.length || 0,
-                returnCount: returnFlights?.length || 0,
-                firstOutbound: outboundFlights?.[0]?.flightNumber,
-                firstReturn: returnFlights?.[0]?.flightNumber
-              });
             }
-          } else {
-            console.log('[Chat] No flight data in response:', Object.keys(data));
+          }
+          
+          // Auto-navigate to itinerary page if user requested itinerary generation or adding to itinerary
+          if (shouldNavigateToItinerary || isAddToItinerary) {
+            console.log('Itinerary generation/add request detected, navigating to itinerary page...');
+            // Small delay to ensure state is saved
+            setTimeout(() => {
+              // Check if there's an existing itinerary to update
+              const existingItinerary = loadCurrentItinerary();
+              
+              if (isAddToItinerary && existingItinerary) {
+                console.log('Found existing itinerary, will update it with new data');
+                // Navigate with update flag - handleGenerateItinerary will check for this
+                // We need to modify handleGenerateItinerary to accept updateExisting flag
+                // For now, use a special message format
+                handleGenerateItinerary(`UPDATE_EXISTING_ITINERARY: ${text}`);
+              } else {
+                handleGenerateItinerary(text);
+              }
+            }, 500);
           }
         } catch (e) {
           console.error('API Error:', e);
@@ -602,27 +1155,43 @@ export default function Chat({ pendingMessage, onPendingMessageSent, onShowDashb
     let destination = null;
     let departureDate = null;
     let returnDate = null;
+    let origin = null;
     
-    // Try to extract destination from various patterns
-    // Pattern 1: "Flights from X to Y"
-    const fromToPattern = /Flights?\s+from\s+[^to]+\s+to\s+([A-Z][a-zA-Z\s]+)/i;
+    // Try to extract origin and destination from various patterns
+    // Pattern 1: "from X to Y" (full pattern)
+    const fromToPattern = /from\s+([^to]+?)\s+to\s+([^\n,]+?)(?:\s+from|\s+to|\s+on|\s+,\s|$)/i;
     const fromToMatch = messageContent.match(fromToPattern);
     if (fromToMatch) {
-      destination = fromToMatch[1].trim();
+      origin = fromToMatch[1].trim().replace(/\.$/, '').trim();
+      destination = fromToMatch[2].trim().split(/\s+from|\s+to|\s+on/)[0].trim();
     }
     
-    // Pattern 2: "from X to Y" (without "Flights" prefix)
-    const simpleFromToPattern = /from\s+[^to]+\s+to\s+([A-Z][a-zA-Z\s]+)/i;
-    const simpleMatch = messageContent.match(simpleFromToPattern);
-    if (simpleMatch && !destination) {
-      destination = simpleMatch[1].trim();
+    // Pattern 2: "Flights from X to Y"
+    if (!fromToMatch || !origin || !destination) {
+      const flightsPattern = /Flights?\s+from\s+([^to]+?)\s+to\s+([^\n,]+?)(?:\s+from|\s+to|\s+on|\s+,\s|$)/i;
+      const flightsMatch = messageContent.match(flightsPattern);
+      if (flightsMatch) {
+        origin = origin || flightsMatch[1].trim().replace(/\.$/, '').trim();
+        destination = destination || flightsMatch[2].trim().split(/\s+from|\s+to|\s+on/)[0].trim();
+      }
     }
     
-    // Pattern 3: Just look for city names after "to"
-    const toPattern = /\s+to\s+([A-Z][a-zA-Z\s]+?)(?:\s|$|,|\.|\n)/i;
-    const toMatch = messageContent.match(toPattern);
-    if (toMatch && !destination) {
-      destination = toMatch[1].trim();
+    // Pattern 3: "generate itinerary from X to Y"
+    if (!origin || !destination) {
+      const generatePattern = messageContent.match(/(?:generate|create|make|plan|show)\s+itinerary\s+from\s+([^to]+?)\s+to\s+([^\n,]+?)(?:\s+from|\s+to|\s+on|\s+,\s|$)/i);
+      if (generatePattern) {
+        origin = origin || generatePattern[1].trim().replace(/\.$/, '').trim();
+        destination = destination || generatePattern[2].trim().split(/\s+from|\s+to|\s+on/)[0].trim();
+      }
+    }
+    
+    // Pattern 4: Just look for city names after "to"
+    if (!destination) {
+      const toPattern = /\s+to\s+([A-Z][a-zA-Z\s]+?)(?:\s+from|\s+to|\s+on|\s|$|,|\.|\n)/i;
+      const toMatch = messageContent.match(toPattern);
+      if (toMatch) {
+        destination = toMatch[1].trim().split(/\s+from|\s+to|\s+on/)[0].trim();
+      }
     }
     
     // Extract dates
@@ -661,22 +1230,46 @@ export default function Chat({ pendingMessage, onPendingMessageSent, onShowDashb
 
   // Handle Generate Itinerary button click - navigate to itinerary page
   const handleGenerateItinerary = (messageContentOrData) => {
+    // Check if this is an update to existing itinerary
+    const isUpdateExisting = typeof messageContentOrData === 'string' && messageContentOrData.startsWith('UPDATE_EXISTING_ITINERARY:');
+    let actualMessageContent = messageContentOrData;
+    
+    if (isUpdateExisting) {
+      // Extract actual message content
+      actualMessageContent = messageContentOrData.replace('UPDATE_EXISTING_ITINERARY:', '').trim();
+      console.log('Updating existing itinerary with message:', actualMessageContent);
+    }
+    
     // Try to parse as JSON first (if it contains route data from MessageBubble)
     let routeData = null;
-    let messageContent = messageContentOrData;
+    let messageContent = actualMessageContent;
     
     try {
-      routeData = JSON.parse(messageContentOrData);
+      routeData = JSON.parse(actualMessageContent);
       if (routeData.messageContent) {
         messageContent = routeData.messageContent;
       }
     } catch (e) {
       // Not JSON, treat as plain message content
-      messageContent = messageContentOrData;
+      messageContent = actualMessageContent;
     }
     
     // Use dashboardData if available (most reliable)
     if (dashboardData && dashboardData.route) {
+      // Find optimal flights from dashboardData based on preferences
+      const optimalOutbound = dashboardData.outboundFlights?.find(f => f.optimalFlight || f.isOptimal);
+      const optimalReturn = dashboardData.returnFlights?.find(f => f.optimalFlight || f.isOptimal);
+      
+      // Save selected flights to tripState
+      if (optimalOutbound) {
+        selectOutboundFlight(optimalOutbound);
+        console.log('Saved selected outbound flight:', optimalOutbound.flightNumber);
+      }
+      if (optimalReturn) {
+        selectReturnFlight(optimalReturn);
+        console.log('Saved selected return flight:', optimalReturn.flightNumber);
+      }
+      
       // Navigate with existing dashboard data
       navigate('/itinerary', {
         state: {
@@ -684,7 +1277,13 @@ export default function Chat({ pendingMessage, onPendingMessageSent, onShowDashb
           flights: dashboardData.flights || [],
           outboundFlights: dashboardData.outboundFlights || [],
           returnFlights: dashboardData.returnFlights || [],
-          preferences: userPreferences ? { preferences: userPreferences } : null
+          // Explicitly pass optimal flights for first and last day display
+          optimalOutboundFlight: optimalOutbound || null,
+          optimalReturnFlight: optimalReturn || null,
+          preferences: userPreferences ? { preferences: userPreferences } : null,
+          // Pass update flag if updating existing itinerary
+          updateExistingItinerary: isUpdateExisting,
+          existingItineraryData: isUpdateExisting ? loadCurrentItinerary() : null
         }
       });
       return;
@@ -751,42 +1350,167 @@ export default function Chat({ pendingMessage, onPendingMessageSent, onShowDashb
           flights: [],
           outboundFlights: [],
           returnFlights: [],
-          preferences: userPreferences ? { preferences: userPreferences } : null
+          preferences: userPreferences ? { preferences: userPreferences } : null,
+          // Pass update flag if updating existing itinerary
+          updateExistingItinerary: isUpdateExisting,
+          existingItineraryData: isUpdateExisting ? loadCurrentItinerary() : null
         }
       });
       return;
     }
     
-    // Fallback: Extract from message content
+    // FIRST: Try to get route info from tripState (most reliable)
+    const currentTripState = loadTripState();
+    let departure = currentTripState?.origin || null;
+    let destination = currentTripState?.destination || null;
+    let departureCode = currentTripState?.originCode || null;
+    let destinationCode = currentTripState?.destinationCode || null;
+    let departureDate = currentTripState?.startDate || null;
+    let returnDate = currentTripState?.endDate || null;
+    
+    console.log('=== Chat.jsx handleGenerateItinerary - tripState data ===');
+    console.log('tripState:', currentTripState);
+    console.log('origin:', departure);
+    console.log('destination:', destination);
+    console.log('startDate:', departureDate);
+    console.log('endDate:', returnDate);
+    
+    // Fallback: Extract from message content if tripState doesn't have it
     const tripInfo = extractTripInfo(messageContent);
     
-    // Try to extract route info from message patterns
-    const routeMatch = messageContent.match(/from\s+([^to]+)\s+to\s+([^\n]+)/i);
-    let departure = 'Unknown';
-    let destination = 'Unknown';
-    let departureCode = '';
-    let destinationCode = '';
+    if (!departure) departure = tripInfo.origin || 'Unknown';
+    if (!destination) destination = tripInfo.destination || 'Unknown';
+    if (!departureCode) departureCode = '';
+    if (!destinationCode) destinationCode = '';
+    if (!departureDate) departureDate = tripInfo.departureDate || null;
+    if (!returnDate) returnDate = tripInfo.returnDate || null;
     
-    if (routeMatch) {
+    // Try to extract route info from message patterns as additional fallback
+    // Pattern 1: "from X to Y" (full pattern)
+    const routeMatch = messageContent.match(/from\s+([^to]+?)\s+to\s+([^\n,]+?)(?:\s+from|\s+to|\s+on|\s+,\s|$)/i);
+    
+    if (departure === 'Unknown' && routeMatch) {
       departure = routeMatch[1].trim();
-      destination = routeMatch[2].trim().split(/\s+/)[0]; // Get first word after "to"
+      departure = departure.replace(/\.$/, '').trim();
+    }
+    if (destination === 'Unknown' && routeMatch) {
+      destination = routeMatch[2].trim();
+      destination = destination.split(/\s+from|\s+to|\s+on/)[0].trim();
+    }
+    
+    // Pattern 2: "generate itinerary from X to Y"
+    if (departure === 'Unknown' || destination === 'Unknown') {
+      const generatePattern = messageContent.match(/(?:generate|create|make|plan|show)\s+itinerary\s+from\s+([^to]+?)\s+to\s+([^\n,]+?)(?:\s+from|\s+to|\s+on|\s+,\s|$)/i);
+      if (generatePattern) {
+        if (departure === 'Unknown') {
+          departure = generatePattern[1].trim().replace(/\.$/, '').trim();
+        }
+        if (destination === 'Unknown') {
+          destination = generatePattern[2].trim().split(/\s+from|\s+to|\s+on/)[0].trim();
+        }
+      }
     }
     
     // Try to extract airport codes (e.g., "IAD → BCN" or "JFK to CDG")
     const codeMatch = messageContent.match(/([A-Z]{3})\s*[→-]\s*([A-Z]{3})/);
     if (codeMatch) {
-      departureCode = codeMatch[1];
-      destinationCode = codeMatch[2];
+      if (!departureCode) departureCode = codeMatch[1];
+      if (!destinationCode) destinationCode = codeMatch[2];
     }
     
-    const routeInfo = {
-      departure: departure,
-      destination: tripInfo.destination || destination,
-      departureCode: departureCode,
-      destinationCode: destinationCode,
-      date: tripInfo.departureDate || new Date().toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }),
-      returnDate: tripInfo.returnDate || null
+    // Extract dates more robustly from message if not in tripState
+    if (!departureDate || !returnDate) {
+      const monthPattern = /(january|february|march|april|may|june|july|august|september|october|november|december|jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\s+(\d{1,2})(?:st|nd|rd|th)?/gi;
+      const dateMatches = [];
+      let match;
+      while ((match = monthPattern.exec(messageContent)) !== null) {
+        dateMatches.push(match[0]);
+      }
+      
+      if (!departureDate && dateMatches.length > 0) {
+        departureDate = dateMatches[0];
+      }
+      if (!returnDate && dateMatches.length > 1) {
+        returnDate = dateMatches[1];
+      }
+    }
+    
+    // Format dates to ISO format for TripState
+    const formatDateToISO = (dateStr) => {
+      if (!dateStr) return null;
+      try {
+        const date = new Date(dateStr);
+        if (!isNaN(date.getTime())) {
+          return date.toISOString().split('T')[0];
+        }
+      } catch (e) {
+        // Fallback: try to parse month name format
+        const monthNames = {
+          'january': 0, 'february': 1, 'march': 2, 'april': 3, 'may': 4, 'june': 5,
+          'july': 6, 'august': 7, 'september': 8, 'october': 9, 'november': 10, 'december': 11,
+          'jan': 0, 'feb': 1, 'mar': 2, 'apr': 3, 'may': 4, 'jun': 5,
+          'jul': 6, 'aug': 7, 'sep': 8, 'oct': 9, 'nov': 10, 'dec': 11
+        };
+        const dateMatch = dateStr.match(/(january|february|march|april|may|june|july|august|september|october|november|december|jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\s+(\d{1,2})/i);
+        if (dateMatch) {
+          const month = monthNames[dateMatch[1].toLowerCase()];
+          const day = parseInt(dateMatch[2]);
+          const currentYear = new Date().getFullYear();
+          const date = new Date(currentYear, month, day);
+          // If date is in the past, use next year
+          if (date < new Date()) {
+            date.setFullYear(currentYear + 1);
+          }
+          return date.toISOString().split('T')[0];
+        }
+      }
+      return null;
     };
+    
+    const routeInfo = {
+      departure: departure || 'Unknown',
+      destination: destination || 'Unknown',
+      departureCode: departureCode || '',
+      destinationCode: destinationCode || '',
+      date: departureDate || new Date().toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }),
+      returnDate: returnDate || null
+    };
+    
+    console.log('=== Final routeInfo ===');
+    console.log(routeInfo);
+    
+    // Update TripState with route info before navigation
+    // Normalize departure city name
+    let normalizedDeparture = departure;
+    if (normalizedDeparture && normalizedDeparture !== 'Unknown') {
+      const cityMappings = {
+        'washington dc': 'Washington DC',
+        'washington': 'Washington DC',
+        'dc': 'Washington DC',
+        'new york': 'New York',
+        'nyc': 'New York',
+        'los angeles': 'Los Angeles',
+        'lax': 'Los Angeles'
+      };
+      normalizedDeparture = cityMappings[normalizedDeparture.toLowerCase()] || normalizedDeparture;
+    }
+    
+    if (normalizedDeparture && destination && normalizedDeparture !== 'Unknown' && destination !== 'Unknown') {
+      console.log('=== handleGenerateItinerary: Saving to tripState ===');
+      console.log('normalizedDeparture:', normalizedDeparture);
+      console.log('destination:', destination);
+      updateTripRoute({
+        departure: normalizedDeparture,
+        destination: destination,
+        departureCode: departureCode,
+        destinationCode: destinationCode,
+        date: formatDateToISO(departureDate) || formatDateToISO(routeInfo.date),
+        returnDate: formatDateToISO(returnDate)
+      });
+      console.log('Updated tripState in handleGenerateItinerary');
+    } else {
+      console.warn('handleGenerateItinerary: Not updating tripState - missing departure or destination');
+    }
     
     navigate('/itinerary', {
       state: {
@@ -794,7 +1518,10 @@ export default function Chat({ pendingMessage, onPendingMessageSent, onShowDashb
         flights: [],
         outboundFlights: [],
         returnFlights: [],
-        preferences: userPreferences ? { preferences: userPreferences } : null
+        preferences: userPreferences ? { preferences: userPreferences } : null,
+        // Pass update flag if updating existing itinerary
+        updateExistingItinerary: isUpdateExisting,
+        existingItineraryData: isUpdateExisting ? loadCurrentItinerary() : null
       }
     });
   };
@@ -987,6 +1714,9 @@ export default function Chat({ pendingMessage, onPendingMessageSent, onShowDashb
     // eslint-disable-next-line react-hooks/exhaustive-deps
   )), [messages, dashboardData, userPreferences]);
 
+  // Show message if we have existing itinerary
+  const showItineraryMessage = hasExistingItinerary && onboardingComplete;
+
   // Show onboarding form if not completed
   if (!onboardingComplete) {
     return (
@@ -1055,6 +1785,47 @@ export default function Chat({ pendingMessage, onPendingMessageSent, onShowDashb
 
       <div className="chat-messages" ref={scrollRef}>
         <div className="container">
+          {showItineraryMessage && (
+            <div style={{
+              padding: '16px 20px',
+              marginBottom: '16px',
+              backgroundColor: '#f0f9ff',
+              borderRadius: '12px',
+              border: '2px solid #bae6fd',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'space-between',
+              flexWrap: 'wrap',
+              gap: '12px'
+            }}>
+              <div style={{ flex: 1 }}>
+                <div style={{ fontSize: '16px', fontWeight: 600, color: '#004C8C', marginBottom: '4px' }}>
+                  Continue Building Your Itinerary
+                </div>
+                <div style={{ fontSize: '14px', color: '#64748b' }}>
+                  You have an existing itinerary. Continue the conversation to add more activities, flights, or hotels. Type "add [activity name]" to add it to your itinerary.
+                </div>
+              </div>
+              <button
+                onClick={() => {
+                  navigate('/itinerary');
+                }}
+                style={{
+                  padding: '10px 20px',
+                  backgroundColor: '#00ADEF',
+                  color: 'white',
+                  border: 'none',
+                  borderRadius: '8px',
+                  cursor: 'pointer',
+                  fontSize: '14px',
+                  fontWeight: 600,
+                  whiteSpace: 'nowrap'
+                }}
+              >
+                View Itinerary
+              </button>
+            </div>
+          )}
           {rendered}
           {isTyping && (
             <div className="message-row">

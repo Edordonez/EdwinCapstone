@@ -237,9 +237,9 @@ Style standard (strict):
 - Dates: ALWAYS use the exact formatted time provided: "{local_time}"
 - Currency and units: respect user_locale.
 - If you need info, ask at most one question at the end.
-- CRITICAL FORMATTING RULE: In ALL itineraries, EVERY single destination name, attraction, landmark, restaurant, museum, district, building, or place name MUST be formatted with **__bold and underlined__** text.
-- Examples: **__Sagrada Familia__**, **__Park Güell__**, **__Gothic Quarter__**, **__Casa Batlló__**, **__La Rambla__**, **__Montjuïc__**, **__Barceloneta Beach__**, **__Picasso Museum__**, **__Born District__**
-- NO EXCEPTIONS: Every place name in the itinerary must use this exact formatting: **__Place Name__**
+- CRITICAL FORMATTING RULE: In ALL itineraries, EVERY single destination name, attraction, landmark, restaurant, museum, district, building, or place name MUST be formatted with **bold** text only (single bold, no underscores).
+- Examples: **Sagrada Familia**, **Park Güell**, **Gothic Quarter Walking Tour**, **Casa Batlló**, **La Rambla**, **Montjuïc**, **Barceloneta Beach**, **Picasso Museum**, **Born District**
+- NO EXCEPTIONS: Every place name in the itinerary must use this exact formatting: **Place Name** (use ** only once, never use __ underscores)
 
 Current local time: {local_time}
 User location: {location}
@@ -381,6 +381,36 @@ Behavior logic:
 - NEVER use specific days of the week (Mon, Tue, Wed) in itineraries unless the user provides specific dates.
 - Use "Day 1", "Day 2", "Day 3" format for generic itineraries.
 - NEVER start planning trips unless explicitly requested.
+
+CRITICAL: MUST-DO ACTIVITIES HANDLING:
+- When a user mentions a specific activity they want to do (e.g., "Free Walking Tour of Barcelona 하고 싶어", "I want to do Sagrada Familia tour", "Visit Park Güell", "Sagrada Familia 하고 싶어", "add Sagrada Familia tour"), you MUST:
+  1. Immediately acknowledge the activity in your response
+  2. Tell the user: "I've added **[activity name]** to your must-do list. It will be prioritized in your itinerary."
+  3. The backend system will automatically detect and save it to TripState.mustDoActivities - you just need to acknowledge it
+  4. When creating itineraries, these must-do activities will be automatically prioritized and included FIRST
+  5. ALL must-do activities MUST appear in the itinerary - they are NEVER omitted
+
+ITINERARY CREATION RULES (when creating ```itinerary``` JSON):
+- Day 1 MUST include outbound flight information (departure time, flight details) - this is the preference-optimized outbound flight
+- Last Day MUST include return flight information (departure time, flight details) for round trips - this is the preference-optimized return flight
+- Between Day 1 and Last Day: 
+  a. The system automatically prioritizes TripState.mustDoActivities FIRST (1-2 per day, evenly distributed across all middle days)
+  b. Must-do activities are placed considering:
+     * Category (museum=morning, nightlife=evening, restaurant=lunch/dinner, tour=afternoon, etc.)
+     * Duration (long activities get more time, short ones fit between others)
+     * Natural time slots (avoid conflicts with hotel check-in/check-out and flight times)
+  c. After must-do activities are placed, remaining time is filled with recommended activities based on user preferences (art, guidedTour, food, etc.)
+  d. Empty/unscheduled days automatically show "Open Exploration" card with message: "Type 'add [activity name]' to insert it into your itinerary."
+- ALL must-do activities MUST appear in the itinerary - they are automatically included with highest priority and NEVER omitted
+- ALL activities MUST include GetYourGuide/Viator booking links as hyperlinks in this format:
+  * Activity title with link: [**Activity Name**](https://www.getyourguide.com/s/?q=Activity+Name)
+  * Or use Viator: [**Activity Name**](https://www.viator.com/searchResults/all?text=Activity+Name)
+  * Links should be actual clickable hyperlinks in markdown format
+  * Example: [**Sagrada Familia Tour**](https://www.getyourguide.com/s/?q=Sagrada+Familia+Tour)
+
+Example must-do activity acknowledgment:
+User: "Free Walking Tour of Barcelona 하고 싶어"
+Assistant response: "Great choice! I've added **Free Walking Tour of Barcelona** to your must-do list. It will be prioritized in your itinerary. [Book here](https://www.getyourguide.com/s/?q=Free+Walking+Tour+of+Barcelona)"
 
 Example rendering (with context):
 Input: "What's today's date?"
@@ -770,9 +800,41 @@ def _generate_booking_link(airline_name, flight_code):
     # Some airlines have specific flight search patterns, but for simplicity, we'll use the base URL
     return base_url
 
-def format_place_names(text):
-    """Format place names in text with bold and underlined formatting"""
+def clean_markdown_formatting(text):
+    """Remove excessive markdown formatting like __ and clean up ** patterns"""
     import re
+    
+    # Remove __ patterns (excessive underscores)
+    text = re.sub(r'__+', '', text)
+    
+    # Clean up excessive ** patterns (remove triple or more asterisks)
+    text = re.sub(r'\*{3,}', '**', text)
+    
+    # Remove standalone ** patterns (where there's no content between)
+    text = re.sub(r'\*\*\s*\*\*', '', text)
+    
+    # Fix patterns like **__text__** to just **text**
+    text = re.sub(r'\*\*__([^*]+)__\*\*', r'**\1**', text)
+    
+    # Fix patterns where closing ** appears at wrong places (e.g., "**Name** Text**")
+    # This handles cases like "**Gothic Quarter** Walking Tour**"
+    text = re.sub(r'\*\*([^*]+)\*\*([^*]+?)\*\*(\s|$|\.|,|;|:|\|)', r'**\1**\2\3', text)
+    
+    # Remove orphaned ** at end of text, words, or after punctuation
+    text = re.sub(r'\*\*(\s|$|\.|,|;|:|\|)', r'\1', text)
+    
+    # Fix patterns where ** appears multiple times incorrectly (e.g., "**Name** **Text**")
+    # Only if there's text between them that shouldn't be bold
+    text = re.sub(r'\*\*([^*\s]+)\*\*\s+\*\*([^*\s]+)\*\*', r'**\1** \2', text)
+    
+    return text
+
+def format_place_names(text):
+    """Format place names in text with bold formatting (single bold, no underscores)"""
+    import re
+    
+    # First, clean any existing excessive markdown formatting
+    text = clean_markdown_formatting(text)
     
     # Common place names and patterns to format
     place_patterns = [
@@ -797,8 +859,15 @@ def format_place_names(text):
         # Find all matches and format them
         matches = re.findall(pattern, text)
         for match in matches:
-            if not match.startswith('**__') and not match.endswith('__**'):
-                text = text.replace(match, f'**__{match}__**')
+            # Only format if not already formatted with ** (avoid double formatting)
+            escaped_match = re.escape(match)
+            # Check if already formatted (with word boundaries to avoid partial matches)
+            if not re.search(r'\*\*' + escaped_match + r'\*\*', text):
+                # Replace the match with formatted version
+                text = text.replace(match, f'**{match}**')
+    
+    # Final cleanup to ensure no excessive formatting
+    text = clean_markdown_formatting(text)
     
     return text
 
@@ -1439,18 +1508,23 @@ async def chat(req: ChatRequest):
         # Get the user's latest message
         user_message = req.messages[-1]["content"]
         
+        # Check if message contains activity-related keywords FIRST (before flight keywords)
+        # This is important to prioritize activity context over generic travel keywords
+        activity_keywords = [
+            'activity', 'activities', 'tour', 'tours', 'guided tour', 'walking tour',
+            'attraction', 'attractions', 'things to do', 'sightseeing', 'sightsee',
+            'visit', 'explore', 'see', 'museum', 'museums', 'park', 'beach',
+            'below', 'under', 'cheap', 'affordable', 'budget'
+        ]
+        has_activity_keywords = any(keyword in user_message.lower() for keyword in activity_keywords)
+        logger.info(f"Activity keyword check: {has_activity_keywords}")
+        
         # Check if message contains flight-related keywords
         flight_keywords = [
             'flight', 'flights', 'airline', 'airlines', 'airplane', 'aircraft', 'plane',
             'ticket', 'tickets', 'booking', 'book', 'reserve', 'reservation',
-            'travel', 'trip', 'journey', 'vacation', 'holiday', 'getaway',
             'destination', 'departure', 'arrival', 'airport', 'terminal',
-            'price', 'prices', 'cost', 'costs', 'expensive', 'cheap', 'cheapest', 
-            'budget', 'affordable', 'fare', 'fares', 'rate', 'rates',
-            'search', 'find', 'look for', 'show me', 'get me', 'need', 'want',
-            'compare', 'comparison', 'options', 'available', 'schedule',
-            'to', 'from', 'between', 'route', 'way', 'path',
-            'today', 'tomorrow', 'next week', 'this month', 'soon', 'when',
+            'fare', 'fares',
             'search flights', 'find flights', 'book flights', 'flight search',
             'airline tickets', 'plane tickets', 'flight booking', 'travel booking'
         ]
@@ -1473,6 +1547,110 @@ async def chat(req: ChatRequest):
                 intent = await intent_detector.analyze_message(user_message, req.messages, context)
                 logger.info(f"Intent detection result: type={intent['type']}, confidence={intent['confidence']}, has_required_params={intent['has_required_params']}")
                 logger.info(f"Extracted parameters: {intent['params']}")
+                
+                # Check conversation context to override incorrect intent detection
+                # Priority: If activity keywords are present OR previous context is about activities
+                should_override_to_activity = False
+                destination = None
+                max_price = None
+                import re
+                
+                if len(req.messages) >= 2:
+                    previous_assistant_msg = None
+                    previous_user_msg = None
+                    # Find the most recent assistant and user messages
+                    for msg in reversed(req.messages[:-1]):
+                        if msg.get("role") == "assistant" and not previous_assistant_msg:
+                            previous_assistant_msg = msg.get("content", "").lower()
+                        if msg.get("role") == "user" and not previous_user_msg:
+                            previous_user_msg = msg.get("content", "").lower()
+                        if previous_assistant_msg and previous_user_msg:
+                            break
+                    
+                    # Check if previous context is about activities
+                    previous_context_is_activity = False
+                    if previous_assistant_msg and any(word in previous_assistant_msg for word in 
+                                                      ["activity", "activities", "tour", "tours", "attraction", 
+                                                       "visit", "things to do", "recommendations", "fantastic activities"]):
+                        previous_context_is_activity = True
+                    
+                    # Check if current message has activity-related keywords
+                    activity_refinement_keywords = ["tour", "guided tour", "walking tour", "under", "below", 
+                                                    "budget", "cheap", "affordable", "less than", "$"]
+                    has_activity_refinement = any(keyword in user_message.lower() for keyword in activity_refinement_keywords)
+                    
+                    # Override to activity_search if:
+                    # 1. Previous context is about activities AND user is refining, OR
+                    # 2. Current message has activity keywords
+                    if (previous_context_is_activity and has_activity_refinement) or has_activity_keywords:
+                        if intent["type"] != "activity_search" or not intent.get("has_required_params"):
+                            should_override_to_activity = True
+                            logger.info(f"[MAIN] Should override to activity_search - previous_context: {previous_context_is_activity}, has_activity_refinement: {has_activity_refinement}, has_activity_keywords: {has_activity_keywords}")
+                    
+                    if should_override_to_activity:
+                        # Try to extract destination from previous assistant message
+                        if previous_assistant_msg:
+                            # Pattern: "activities in Barcelona" or "to Barcelona" or "**Barcelona" 
+                            destination_patterns = [
+                                r'\b(activities in|tours in|things to do in|to)\s+([A-Z][a-zA-Z\s]+)',
+                                r'\*\*([A-Z][a-zA-Z]+)\*\*',  # **Barcelona**
+                                r'\b([A-Z][a-zA-Z]+)\s+from',  # "Barcelona from"
+                            ]
+                            for pattern in destination_patterns:
+                                dest_match = re.search(pattern, previous_assistant_msg)
+                                if dest_match:
+                                    destination = dest_match.group(2) if len(dest_match.groups()) > 1 else dest_match.group(1)
+                                    destination = destination.strip()
+                                    if destination and len(destination.split()) <= 3:  # Valid city name
+                                        break
+                        
+                        # Try to extract from previous user messages
+                        if not destination:
+                            for msg in reversed(req.messages):
+                                if msg.get("role") == "user":
+                                    user_content = msg.get("content", "")
+                                    # Pattern: "activities in Barcelona" or "Top activities in Barcelona"
+                                    dest_patterns = [
+                                        r'\b(activities|tours|things to do)\s+(in|at)\s+([A-Z][a-zA-Z\s]+)',
+                                        r'\b(in|at)\s+([A-Z][a-zA-Z]+)\s+from',  # "in Barcelona from"
+                                        r'\b(in|at)\s+([A-Z][a-zA-Z\s]+)(?:\s+from|\s+to|$)',  # "in Barcelona"
+                                    ]
+                                    for pattern in dest_patterns:
+                                        dest_match = re.search(pattern, user_content)
+                                        if dest_match:
+                                            destination = dest_match.group(3) if len(dest_match.groups()) >= 3 else dest_match.group(2)
+                                            destination = destination.strip()
+                                            # Clean up common trailing words
+                                            destination = re.sub(r'\s+(from|to|on|in|at)$', '', destination)
+                                            if destination and len(destination.split()) <= 3:
+                                                break
+                                    if destination:
+                                        break
+                        
+                        # Extract max_price if mentioned (handle both $20 and "below $20", "under 20")
+                        price_patterns = [
+                            r'\$(\d+)',
+                            r'(?:below|under|less than|cheaper than)\s+\$?(\d+)',
+                            r'\$?(\d+)\s+(?:or less|or under|or below)'
+                        ]
+                        for pattern in price_patterns:
+                            price_match = re.search(pattern, user_message.lower())
+                            if price_match:
+                                max_price = int(price_match.group(1))
+                                break
+                        
+                        # Always set has_required_params to True since we have a default destination
+                        final_destination = destination or "Barcelona"
+                        intent = {
+                            "type": "activity_search",
+                            "confidence": 0.9,
+                            "params": {
+                                "destination": final_destination,  # Default to Barcelona if not found
+                                "max_price": max_price
+                            },
+                            "has_required_params": True  # Always True since we have destination (default or extracted)
+                        }
+                        logger.info(f"[MAIN] Overridden intent to activity_search: destination={final_destination}, max_price={max_price}, has_required_params=True")
             except Exception as e:
                 logger.error(f"Intent detection failed: {e}")
                 intent = {"type": "general", "confidence": 0.0, "has_required_params": False, "params": {}}
@@ -1488,8 +1666,9 @@ async def chat(req: ChatRequest):
         route_return_date = None
         
         # Always fetch flight data if flight keywords are detected, regardless of intent detection
+        # BUT skip if we've determined it should be activity_search
         route_info_extracted = None  # Store extracted route info for fallback
-        if has_flight_keywords:
+        if has_flight_keywords and intent.get("type") != "activity_search":
             logger.info("Flight keywords detected - using intent detection for route and dates")
             
             # Use intent detection results if available, otherwise fallback to extraction
@@ -2047,7 +2226,7 @@ async def chat(req: ChatRequest):
                 reply = response.choices[0].message.content
                 logger.info(f"Generated reply: {reply[:100]}...")
                 
-                # Post-process the reply to format place names with bold and underlined text
+                # Post-process the reply to format place names with bold text (single bold, no underscores)
                 reply = format_place_names(reply)
             except Exception as e:
                 logger.error(f"OpenAI API error: {e}")

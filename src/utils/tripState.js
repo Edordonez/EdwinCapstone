@@ -13,6 +13,9 @@ const defaultTripState = {
   endDate: null,
   preferenceWeights: null,
   optimalFlight: null,  // The flight with highest preference score
+  selectedOutboundFlight: null,  // User-selected outbound flight
+  selectedReturnFlight: null,    // User-selected return flight
+  selectedHotel: null,            // User-selected hotel
   filters: {
     activityBudgetMax: null,
   },
@@ -286,6 +289,105 @@ export const clearTripState = () => {
   const state = { ...defaultTripState, lastUpdated: new Date().toISOString() };
   writeState(state);
   return state;
+};
+
+// Save current itinerary state (for Back to Results -> Add to Itinerary flow)
+export const saveCurrentItinerary = (itineraryData) => {
+  const state = loadTripState();
+  return saveTripState({
+    ...state,
+    currentItinerary: itineraryData, // Save full itinerary data including days
+    hasExistingItinerary: true,
+  });
+};
+
+// Load current itinerary state
+export const loadCurrentItinerary = () => {
+  const state = loadTripState();
+  return state?.currentItinerary || null;
+};
+
+// Clear current itinerary
+export const clearCurrentItinerary = () => {
+  const state = loadTripState();
+  if (state.currentItinerary) {
+    delete state.currentItinerary;
+    state.hasExistingItinerary = false;
+    return saveTripState(state);
+  }
+  return state;
+};
+
+// Save conversation messages (for Back to Results -> Chat flow)
+export const saveConversation = (messages, sessionId = null, context = null, userPreferences = null) => {
+  const state = loadTripState();
+  return saveTripState({
+    ...state,
+    savedConversation: {
+      messages: messages || [],
+      sessionId: sessionId,
+      context: context,
+      userPreferences: userPreferences,
+      savedAt: new Date().toISOString()
+    },
+    hasSavedConversation: true
+  });
+};
+
+// Load saved conversation
+export const loadConversation = () => {
+  const state = loadTripState();
+  return state?.savedConversation || null;
+};
+
+// Clear saved conversation
+export const clearConversation = () => {
+  const state = loadTripState();
+  if (state.savedConversation) {
+    delete state.savedConversation;
+    state.hasSavedConversation = false;
+    return saveTripState(state);
+  }
+  return state;
+};
+
+// Select outbound flight (user selection)
+export const selectOutboundFlight = (flight) => {
+  if (!flight) return loadTripState();
+  const state = loadTripState();
+  return saveTripState({
+    ...state,
+    selectedOutboundFlight: {
+      ...flight,
+      selectedAt: new Date().toISOString()
+    }
+  });
+};
+
+// Select return flight (user selection)
+export const selectReturnFlight = (flight) => {
+  if (!flight) return loadTripState();
+  const state = loadTripState();
+  return saveTripState({
+    ...state,
+    selectedReturnFlight: {
+      ...flight,
+      selectedAt: new Date().toISOString()
+    }
+  });
+};
+
+// Select hotel (user selection)
+export const selectHotel = (hotel) => {
+  if (!hotel) return loadTripState();
+  const state = loadTripState();
+  return saveTripState({
+    ...state,
+    selectedHotel: {
+      ...hotel,
+      selectedAt: new Date().toISOString()
+    }
+  });
 };
 
 export { TRIP_STATE_KEY };
