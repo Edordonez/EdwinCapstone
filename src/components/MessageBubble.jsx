@@ -1603,23 +1603,31 @@ function renderTable(rows, tableIndex = 0, onGenerateItinerary = null, onSaveTri
     }
   }
   
-  // Check if this is an Activity table (has "Activity" in header and "Duration" or "Price")
-  const isActivityTable = rows.length > 0 && rows[0] && (
-    (rows[0].some(cell => cell && cell.toString().toLowerCase().includes('activity')) ||
-     rows[0].some(cell => cell && cell.toString().toLowerCase().includes('name'))) &&
-    (rows[0].some(cell => cell && cell.toString().toLowerCase().includes('duration')) ||
-     rows[0].some(cell => cell && cell.toString().toLowerCase().includes('price')) ||
-     rows[0].some(cell => cell && cell.toString().toLowerCase().includes('booking')))
-  );
-  
-  // If it's an Activity table, render with improved UI
-  if (isActivityTable && rows.length > 1) {
-    return <ActivityTable rows={rows} tableIndex={tableIndex} messageContent={messageContent} userPreferences={userPreferences} key={uniqueKey} />;
-  }
-  
-  // Activity table component
+  // Currency formatter utility - defined before ActivityTable to avoid initialization error
+  const formatCurrency = (amount, currency = 'USD') => {
+    if (!amount) return '—';
+    const numAmount = typeof amount === 'string' 
+      ? parseFloat(amount.replace(/[^\d.-]/g, '')) 
+      : parseFloat(amount);
+    if (isNaN(numAmount)) return '—';
+    
+    const currencySymbols = {
+      'USD': '$',
+      'EUR': '€',
+      'GBP': '£',
+      'JPY': '¥',
+      'CAD': 'C$',
+      'AUD': 'A$'
+    };
+    
+    const symbol = currencySymbols[currency] || currency + ' ';
+    return `${symbol}${numAmount.toLocaleString('en-US', { minimumFractionDigits: 0, maximumFractionDigits: 2 })}`;
+  };
+
+  // Activity table component - REDESIGNED as Card Grid Layout
   function ActivityTable({ rows, tableIndex, messageContent, userPreferences = null }) {
     const [selectedActivities, setSelectedActivities] = useState(new Set());
+    const [showAddedNotice, setShowAddedNotice] = useState(false);
     
     const headerRow = rows[0];
     const getColumnIndex = (keywords) => {
@@ -1638,6 +1646,7 @@ function renderTable(rows, tableIndex = 0, onGenerateItinerary = null, onSaveTri
     const priceIndex = getColumnIndex(['price']);
     const bookingIndex = getColumnIndex(['booking', 'book']);
     const typeIndex = getColumnIndex(['type', 'category']);
+    const ratingIndex = getColumnIndex(['rating', 'stars']);
     
     // Extract activities from rows
     const activities = [];
@@ -1726,14 +1735,28 @@ function renderTable(rows, tableIndex = 0, onGenerateItinerary = null, onSaveTri
         // Extract currency and amount
         const usdMatch = priceStr.match(/\$?\s*(\d+(?:,\d{3})*(?:\.\d{2})?)/);
         const eurMatch = priceStr.match(/€?\s*(\d+(?:,\d{3})*(?:\.\d{2})?)/);
+        const gbpMatch = priceStr.match(/£?\s*(\d+(?:,\d{3})*(?:\.\d{2})?)/);
         if (usdMatch) {
           price = usdMatch[1].replace(/,/g, '');
           currency = 'USD';
         } else if (eurMatch) {
           price = eurMatch[1].replace(/,/g, '');
           currency = 'EUR';
+        } else if (gbpMatch) {
+          price = gbpMatch[1].replace(/,/g, '');
+          currency = 'GBP';
         } else {
           price = priceStr;
+        }
+      }
+      
+      // Extract rating if available
+      let rating = null;
+      if (ratingIndex >= 0 && row[ratingIndex]) {
+        const ratingStr = row[ratingIndex].toString().trim();
+        const ratingMatch = ratingStr.match(/(\d+\.?\d*)\s*(?:\/|out of|stars)/i);
+        if (ratingMatch) {
+          rating = parseFloat(ratingMatch[1]);
         }
       }
       
@@ -1774,6 +1797,7 @@ function renderTable(rows, tableIndex = 0, onGenerateItinerary = null, onSaveTri
         duration,
         price,
         currency,
+        rating,
         bookingLinks
       });
     }
@@ -1824,7 +1848,7 @@ function renderTable(rows, tableIndex = 0, onGenerateItinerary = null, onSaveTri
       }
     }
     
-    // Get user preferences for banner (same structure as HotelTable)
+    // Get user preferences for banner
     const prefs = userPreferences?.preferences || {};
     const budget = prefs.budget || 0.33;
     const quality = prefs.quality || 0.33;
@@ -1834,300 +1858,393 @@ function renderTable(rows, tableIndex = 0, onGenerateItinerary = null, onSaveTri
     const qualityPct = totalWeight > 0 ? ((quality / totalWeight) * 100).toFixed(1) : '33.3';
     const conveniencePct = totalWeight > 0 ? ((convenience / totalWeight) * 100).toFixed(1) : '33.4';
     
+    // Determine which preference is prioritized
+    const getPriorityText = () => {
+      if (parseFloat(budgetPct) >= 50) return 'Budget';
+      if (parseFloat(qualityPct) >= 50) return 'Quality';
+      if (parseFloat(conveniencePct) >= 50) return 'Convenience';
+      return 'your preferences';
+    };
+    
+    // Handle add to itinerary
+    const handleToggleActivity = (idx) => {
+      const newSelected = new Set(selectedActivities);
+      const wasAdded = newSelected.has(idx);
+      
+      if (wasAdded) {
+        newSelected.delete(idx);
+      } else {
+        newSelected.add(idx);
+        if (!showAddedNotice && newSelected.size === 1) {
+          setShowAddedNotice(true);
+          setTimeout(() => setShowAddedNotice(false), 5000);
+        }
+      }
+      setSelectedActivities(newSelected);
+    };
+    
     return (
       <div style={{ margin: '16px 0', padding: '0 24px' }}>
         {/* Header with subheader */}
-        <div style={{ marginBottom: '16px' }}>
+        <div style={{ marginBottom: '20px' }}>
           <h2 style={{ 
-            fontSize: '20px', 
+            fontSize: '22px', 
             fontWeight: '700', 
-            margin: '0 0 4px 0', 
+            margin: '0 0 6px 0', 
             color: '#004C8C' 
           }}>
             Top Activities in {cityName}
           </h2>
           <p style={{ 
-            fontSize: '13px', 
+            fontSize: '14px', 
             color: '#64748b', 
-            margin: '0',
-            fontStyle: 'italic'
+            margin: '0 0 12px 0'
           }}>
             Ranked by how well they match your preferences.
           </p>
+          
+          {/* Preference Banner */}
+          {userPreferences && (
+            <div style={{
+              marginBottom: '12px',
+              borderRadius: '12px',
+              backgroundColor: '#E0F2FE',
+              padding: '10px 16px',
+              fontSize: '12px',
+              color: '#1e40af'
+            }}>
+              <div style={{ fontWeight: '600', marginBottom: '4px' }}>
+                Preferences · Budget {budgetPct}% · Quality {qualityPct}% · Convenience {conveniencePct}%
+              </div>
+            </div>
+          )}
+          
+          {/* Optimization explanation */}
+          {userPreferences && (
+            <p style={{
+              fontSize: '13px',
+              color: '#64748b',
+              margin: '0 0 0 0',
+              fontStyle: 'italic'
+            }}>
+              These results prioritize {getPriorityText()} based on your preferences.
+            </p>
+          )}
         </div>
         
-        {/* Minimal Preference Banner */}
-        {userPreferences && (
+        {/* Activity Card Grid - Responsive: 1 col mobile, 2-3 cols desktop */}
         <div style={{
-          marginBottom: '16px',
-            borderRadius: '12px',
-            backgroundColor: '#E0F2FE',
-            padding: '8px 16px',
-            fontSize: '12px',
-            color: '#1e40af'
+          display: 'grid',
+          gridTemplateColumns: 'repeat(auto-fill, minmax(300px, 1fr))',
+          gap: '20px',
+          marginBottom: '24px'
         }}>
-            Preferences · Budget {budgetPct}% · Quality {qualityPct}% · Convenience {conveniencePct}%
-        </div>
-        )}
-        
-        <p style={{
-          fontSize: '14px',
-          color: '#4A4A4A',
-          lineHeight: '1.5',
-          marginBottom: '12px'
-        }}>
-          Here are activity recommendations in {cityName}, sorted by how well they fit your preferences.
-        </p>
-        
-        {/* Activity Table */}
-        <div style={{ overflowX: 'auto' }}>
-          <table style={{ 
-            width: '100%', 
-            borderCollapse: 'collapse', 
-            fontSize: '14px',
-            border: '1px solid #e2e8f0',
-            borderRadius: '8px',
-            overflow: 'hidden',
-            backgroundColor: 'white'
-          }}>
-            <thead>
-              <tr style={{ backgroundColor: '#f8fafc' }}>
-                <th style={{ padding: '16px', textAlign: 'left', fontWeight: '600', color: '#004C8C', borderBottom: '2px solid #e2e8f0' }}>
-                  Activity
-                </th>
-                <th style={{ padding: '16px', textAlign: 'center', fontWeight: '600', color: '#004C8C', borderBottom: '2px solid #e2e8f0' }}>
-                  Duration
-                </th>
-                <th style={{ padding: '16px', textAlign: 'right', fontWeight: '600', color: '#004C8C', borderBottom: '2px solid #e2e8f0' }}>
-                  Price
-                </th>
-                <th style={{ padding: '16px', textAlign: 'center', fontWeight: '600', color: '#004C8C', borderBottom: '2px solid #e2e8f0' }}>
-                  Booking
-                </th>
-              </tr>
-            </thead>
-            <tbody>
-              {activities.map((activity, idx) => {
-                const isSelected = selectedActivities.has(idx);
+          {activities.map((activity, idx) => {
+            const isSelected = selectedActivities.has(idx);
+            const isBestMatch = idx === 0;
+            const getYourGuideLink = activity.bookingLinks.find(link => 
+              link.provider === 'GetYourGuide' || link.url.includes('getyourguide')
+            );
+            const bookingUrl = getYourGuideLink?.url || 
+                              activity.bookingLinks[0]?.url || 
+                              activity.url;
+            
+            // Use rating from activity object
+            const rating = activity.rating;
+            
+            return (
+              <div
+                key={idx}
+                style={{
+                  backgroundColor: isBestMatch ? '#F0F9FF' : '#ffffff',
+                  border: isBestMatch ? '2px solid #00ADEF' : '1px solid #e2e8f0',
+                  borderRadius: '12px',
+                  padding: '20px',
+                  boxShadow: isBestMatch 
+                    ? '0 4px 6px rgba(0, 172, 239, 0.1)' 
+                    : '0 2px 4px rgba(0, 0, 0, 0.05)',
+                  transition: 'all 0.2s ease',
+                  display: 'flex',
+                  flexDirection: 'column',
+                  gap: '12px',
+                  position: 'relative'
+                }}
+                onMouseEnter={(e) => {
+                  if (!isBestMatch) {
+                    e.currentTarget.style.boxShadow = '0 4px 8px rgba(0, 0, 0, 0.1)';
+                    e.currentTarget.style.transform = 'translateY(-2px)';
+                  }
+                }}
+                onMouseLeave={(e) => {
+                  if (!isBestMatch) {
+                    e.currentTarget.style.boxShadow = '0 2px 4px rgba(0, 0, 0, 0.05)';
+                    e.currentTarget.style.transform = 'translateY(0)';
+                  }
+                }}
+              >
+                {/* Best Match Badge */}
+                {isBestMatch && (
+                  <div style={{
+                    position: 'absolute',
+                    top: '12px',
+                    right: '12px',
+                    backgroundColor: '#00ADEF',
+                    color: '#ffffff',
+                    fontSize: '11px',
+                    fontWeight: '600',
+                    padding: '4px 10px',
+                    borderRadius: '12px',
+                    textTransform: 'uppercase',
+                    letterSpacing: '0.5px'
+                  }}>
+                    🔥 Best match
+                  </div>
+                )}
                 
-                return (
-                  <tr 
-                    key={idx} 
-                    onClick={() => {
-                      const newSelected = new Set(selectedActivities);
-                      if (isSelected) {
-                        newSelected.delete(idx);
-                      } else {
-                        newSelected.add(idx);
+                {/* Title */}
+                <div>
+                  {activity.url ? (
+                    <a
+                      href={activity.url}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      onClick={(e) => e.stopPropagation()}
+                      style={{
+                        fontWeight: '600',
+                        fontSize: '18px',
+                        color: '#1e40af',
+                        textDecoration: 'none',
+                        lineHeight: '1.4',
+                        display: 'block',
+                        marginBottom: '8px'
+                      }}
+                      onMouseEnter={(e) => {
+                        e.currentTarget.style.textDecoration = 'underline';
+                      }}
+                      onMouseLeave={(e) => {
+                        e.currentTarget.style.textDecoration = 'none';
+                      }}
+                    >
+                      {activity.name}
+                    </a>
+                  ) : (
+                    <h3 style={{
+                      fontWeight: '600',
+                      fontSize: '18px',
+                      color: '#004C8C',
+                      margin: '0 0 8px 0',
+                      lineHeight: '1.4'
+                    }}>
+                      {activity.name}
+                    </h3>
+                  )}
+                  
+                  {/* Category Tag */}
+                  {activity.type && (
+                    <div style={{ marginBottom: '8px' }}>
+                      <span style={{
+                        display: 'inline-block',
+                        fontSize: '12px',
+                        fontWeight: '500',
+                        color: '#64748b',
+                        backgroundColor: '#f1f5f9',
+                        padding: '4px 10px',
+                        borderRadius: '6px'
+                      }}>
+                        {activity.type}
+                      </span>
+                    </div>
+                  )}
+                </div>
+                
+                {/* Description */}
+                {activity.description && (
+                  <p style={{
+                    fontSize: '14px',
+                    color: '#64748b',
+                    lineHeight: '1.6',
+                    margin: '0',
+                    flex: '1'
+                  }}>
+                    {activity.description}
+                  </p>
+                )}
+                
+                {/* Meta Info: Duration & Rating */}
+                <div style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '16px',
+                  fontSize: '13px',
+                  color: '#64748b'
+                }}>
+                  {activity.duration && (
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
+                      <span>⏱️</span>
+                      <span>{activity.duration}</span>
+                    </div>
+                  )}
+                  {rating && (
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
+                      <span>⭐</span>
+                      <span>{rating.toFixed(1)}/5.0</span>
+                    </div>
+                  )}
+                </div>
+                
+                {/* Price */}
+                {activity.price && (
+                  <div style={{
+                    fontSize: '20px',
+                    fontWeight: '700',
+                    color: '#059669'
+                  }}>
+                    {formatCurrency(activity.price, activity.currency)}
+                  </div>
+                )}
+                
+                {/* Action Buttons */}
+                <div style={{
+                  display: 'flex',
+                  gap: '10px',
+                  flexWrap: 'wrap'
+                }}>
+                  {/* Add to Itinerary Button */}
+                  <button
+                    onClick={() => handleToggleActivity(idx)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' || e.key === ' ') {
+                        e.preventDefault();
+                        handleToggleActivity(idx);
                       }
-                      setSelectedActivities(newSelected);
                     }}
-                    style={{ 
-                      backgroundColor: isSelected ? '#E6F7FF' : (idx % 2 === 0 ? '#ffffff' : '#f8fafc'),
-                      borderBottom: idx < activities.length - 1 ? '1px solid #e2e8f0' : 'none',
-                      borderLeft: isSelected ? '4px solid #00ADEF' : '4px solid transparent',
+                    style={{
+                      flex: '1',
+                      minWidth: '140px',
+                      padding: '10px 16px',
+                      fontSize: '14px',
+                      fontWeight: '500',
+                      color: isSelected ? '#ffffff' : '#004C8C',
+                      backgroundColor: isSelected ? '#00ADEF' : 'transparent',
+                      border: `2px solid ${isSelected ? '#00ADEF' : '#004C8C'}`,
+                      borderRadius: '8px',
                       cursor: 'pointer',
-                      transition: 'all 0.2s ease'
+                      transition: 'all 0.2s ease',
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      gap: '6px'
                     }}
                     onMouseEnter={(e) => {
                       if (!isSelected) {
-                        e.currentTarget.style.backgroundColor = '#f0f9ff';
+                        e.currentTarget.style.backgroundColor = '#004C8C';
+                        e.currentTarget.style.color = '#ffffff';
                       }
                     }}
                     onMouseLeave={(e) => {
                       if (!isSelected) {
-                        e.currentTarget.style.backgroundColor = idx % 2 === 0 ? '#ffffff' : '#f8fafc';
+                        e.currentTarget.style.backgroundColor = 'transparent';
+                        e.currentTarget.style.color = '#004C8C';
                       }
                     }}
                   >
-                    {/* Activity Name + Type + Description */}
-                    <td style={{ padding: '16px', textAlign: 'left', verticalAlign: 'top' }}>
-                      <div style={{ display: 'flex', alignItems: 'flex-start', gap: '8px' }}>
-                        {isSelected && (
-                          <span style={{ 
-                            color: '#00ADEF', 
-                            fontSize: '18px',
-                            marginTop: '2px',
-                            fontWeight: 'bold'
-                          }}>✓</span>
-                        )}
-                        <div style={{ flex: 1 }}>
-                          <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '6px', flexWrap: 'wrap' }}>
-                            {activity.url ? (
-                              <a
-                                href={activity.url}
-                                target="_blank"
-                                rel="noopener noreferrer"
-                                onClick={(e) => e.stopPropagation()}
-                                style={{ 
-                                  fontWeight: '600', 
-                                  fontSize: '15px',
-                                  color: '#1e40af',
-                                  textDecoration: 'none',
-                                  lineHeight: '1.4'
-                                }}
-                                onMouseEnter={(e) => {
-                                  e.currentTarget.style.textDecoration = 'underline';
-                                  e.currentTarget.style.color = '#1e3a8a';
-                                }}
-                                onMouseLeave={(e) => {
-                                  e.currentTarget.style.textDecoration = 'none';
-                                  e.currentTarget.style.color = '#1e40af';
-                                }}
-                              >
-                                {activity.name}
-                              </a>
-                            ) : (
-                            <div style={{ 
-                              fontWeight: '600', 
-                              fontSize: '15px',
-                              color: '#004C8C',
-                              lineHeight: '1.4'
-                            }}>
-                              {activity.name}
-                            </div>
-                            )}
-                            {isSelected && (
-                              <span style={{
-                                display: 'inline-block',
-                                fontSize: '10px',
-                                fontWeight: '600',
-                                color: '#00ADEF',
-                                backgroundColor: '#E6F7FF',
-                                padding: '3px 8px',
-                                borderRadius: '12px',
-                                border: '1px solid #00ADEF'
-                              }}>
-                                ✓ Added to itinerary
-                              </span>
-                            )}
-                          </div>
-                          {activity.type && (
-                            <div style={{ marginBottom: '8px' }}>
-                              <span style={{
-                                display: 'inline-block',
-                                fontSize: '11px',
-                                fontWeight: '500',
-                                color: '#64748b',
-                                backgroundColor: '#f1f5f9',
-                                padding: '4px 8px',
-                                borderRadius: '4px',
-                                marginRight: '6px'
-                              }}>
-                                {activity.type}
-                              </span>
-                            </div>
-                          )}
-                          {activity.description && (
-                            <p style={{ 
-                              fontSize: '13px', 
-                              color: '#64748b',
-                              lineHeight: '1.5',
-                              marginTop: '6px',
-                              marginBottom: '0'
-                            }}>
-                              {activity.description}
-                            </p>
-                          )}
-                        </div>
-                      </div>
-                    </td>
-                    
-                    {/* Duration */}
-                    <td style={{ padding: '16px', textAlign: 'center', verticalAlign: 'middle' }}>
-                      {activity.duration ? (
-                        <span style={{ fontSize: '14px', color: '#64748b' }}>
-                          {activity.duration}
-                        </span>
-                      ) : (
-                        <span style={{ color: '#cbd5e1' }}>—</span>
-                      )}
-                    </td>
-                    
-                    {/* Price */}
-                    <td style={{ padding: '16px', textAlign: 'right', verticalAlign: 'middle' }}>
-                      {activity.price ? (
-                        <span style={{ 
-                          fontSize: '15px', 
-                          fontWeight: '600',
-                          color: '#059669'
-                        }}>
-                          {activity.currency} {activity.price}
-                        </span>
-                      ) : (
-                        <span style={{ color: '#cbd5e1' }}>—</span>
-                      )}
-                    </td>
-                    
-                    {/* Booking */}
-                    <td style={{ padding: '16px', textAlign: 'center', verticalAlign: 'middle' }}>
-                      {(() => {
-                        // Find GetYourGuide link first, then fallback to other booking links or activity URL
-                        const getYourGuideLink = activity.bookingLinks.find(link => 
-                          link.provider === 'GetYourGuide' || link.url.includes('getyourguide')
-                        );
-                        const bookingUrl = getYourGuideLink?.url || 
-                                          activity.bookingLinks[0]?.url || 
-                                          activity.url;
-                            
-                        return bookingUrl ? (
-                              <a
-                            href={bookingUrl}
-                                target="_blank"
-                                rel="noopener noreferrer"
-                                onClick={(e) => e.stopPropagation()}
-                                style={{
-                              color: '#1e40af',
-                                  textDecoration: 'none',
-                              fontSize: '13px',
-                              fontWeight: '500',
-                              padding: '6px 12px',
-                                  borderRadius: '6px',
-                              border: '1px solid #1e40af',
-                                  display: 'inline-block',
-                              transition: 'all 0.2s ease'
-                                }}
-                                onMouseEnter={(e) => {
-                              e.currentTarget.style.backgroundColor = '#1e40af';
-                              e.currentTarget.style.color = '#ffffff';
-                                }}
-                                onMouseLeave={(e) => {
-                              e.currentTarget.style.backgroundColor = 'transparent';
-                              e.currentTarget.style.color = '#1e40af';
-                                }}
-                              >
-                            {getYourGuideLink ? 'Book on GetYourGuide' : 'Book tour'}
-                              </a>
-                      ) : (
-                        <span style={{ color: '#cbd5e1' }}>—</span>
-                        );
-                      })()}
-                    </td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
+                    {isSelected ? (
+                      <>
+                        <span>✓</span>
+                        <span>Added to itinerary</span>
+                      </>
+                    ) : (
+                      <span>Add to itinerary</span>
+                    )}
+                  </button>
+                  
+                  {/* Booking Button */}
+                  {bookingUrl && (
+                    <a
+                      href={bookingUrl}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      onClick={(e) => e.stopPropagation()}
+                      style={{
+                        padding: '10px 16px',
+                        fontSize: '14px',
+                        fontWeight: '500',
+                        color: '#1e40af',
+                        backgroundColor: 'transparent',
+                        border: '2px solid #1e40af',
+                        borderRadius: '8px',
+                        textDecoration: 'none',
+                        display: 'inline-flex',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        transition: 'all 0.2s ease'
+                      }}
+                      onMouseEnter={(e) => {
+                        e.currentTarget.style.backgroundColor = '#1e40af';
+                        e.currentTarget.style.color = '#ffffff';
+                      }}
+                      onMouseLeave={(e) => {
+                        e.currentTarget.style.backgroundColor = 'transparent';
+                        e.currentTarget.style.color = '#1e40af';
+                      }}
+                    >
+                      {getYourGuideLink ? 'Book on GetYourGuide' : 'Book tour'}
+                    </a>
+                  )}
+                </div>
+              </div>
+            );
+          })}
         </div>
+        
+        {/* Added to Itinerary Notice */}
+        {showAddedNotice && (
+          <div style={{
+            marginTop: '16px',
+            padding: '12px 16px',
+            backgroundColor: '#E6F7FF',
+            border: '1px solid #00ADEF',
+            borderRadius: '8px',
+            fontSize: '14px',
+            color: '#004C8C'
+          }}>
+            ✓ Activity added to your itinerary. View or edit it on the Itinerary page.
+          </div>
+        )}
         
         {/* Footer text */}
         <div style={{
-          marginTop: '20px',
-          padding: '16px',
+          marginTop: '24px',
+          padding: '20px',
           fontSize: '14px',
           color: '#64748b',
           lineHeight: '1.6',
-          textAlign: 'left'
+          backgroundColor: '#f8fafc',
+          borderRadius: '12px'
         }}>
           <p style={{ margin: '0 0 8px 0' }}>
-            These activities offer a great taste of {cityName}'s culture, food, and history.
+            These activities offer a great mix of {cityName}'s culture, food, and history.
           </p>
           <p style={{ margin: '0' }}>
-            Tell me which ones you'd like to add to your itinerary or if you'd like more options.
+            Tell me which ones you'd like to add to your itinerary, or click 'Add to itinerary' on any card.
           </p>
         </div>
       </div>
     );
+  }
+  
+  // Check if this is an Activity table (has "Activity" in header and "Duration" or "Price")
+  const isActivityTable = rows.length > 0 && rows[0] && (
+    (rows[0].some(cell => cell && cell.toString().toLowerCase().includes('activity')) ||
+     rows[0].some(cell => cell && cell.toString().toLowerCase().includes('name'))) &&
+    (rows[0].some(cell => cell && cell.toString().toLowerCase().includes('duration')) ||
+     rows[0].some(cell => cell && cell.toString().toLowerCase().includes('price')) ||
+     rows[0].some(cell => cell && cell.toString().toLowerCase().includes('booking')))
+  );
+  
+  // If it's an Activity table, render with improved UI
+  if (isActivityTable && rows.length > 1) {
+    return <ActivityTable rows={rows} tableIndex={tableIndex} messageContent={messageContent} userPreferences={userPreferences} key={uniqueKey} />;
   }
   
   // If it's a hotel table, render with summary cards at top and detailed table below

@@ -394,7 +394,7 @@ class AmadeusService:
             logger.error(f"Location search failed: {e}")
             return {"error": str(e), "locations": []}
     
-    def get_city_coordinates(self, city_name: str) -> Optional[Tuple[float, float]]:
+        def get_city_coordinates(self, city_name: str) -> Optional[Tuple[float, float]]:
         """
         Get coordinates (latitude, longitude) for a city name
         Uses the location search API to find city coordinates
@@ -415,7 +415,6 @@ class AmadeusService:
             locations = location_data.get("locations", [])
             
             # Find the first city result (not airport) with coordinates
-            found_city_with_coords = False
             for location in locations:
                 if location.get("type") == "CITY":
                     # Check if coordinates are available in the location data
@@ -428,40 +427,38 @@ class AmadeusService:
                                 lat_float = float(lat) if isinstance(lat, str) else lat
                                 lon_float = float(lon) if isinstance(lon, str) else lon
                                 logger.info(f"[GEOCODE] Found coordinates for {city_name} from Amadeus API: {lat_float}, {lon_float}")
-                                found_city_with_coords = True
                                 return (lat_float, lon_float)
                             except (ValueError, TypeError) as e:
                                 logger.warning(f"[GEOCODE] Invalid coordinates format for {city_name}: {e}")
             
             # Fallback to external geocoding service if Amadeus didn't provide usable coordinates
-            if not found_city_with_coords:
-                try:
-                    # Use a free geocoding service as fallback
-                    import requests
-                    logger.info(f"[GEOCODE] Using OpenStreetMap fallback for {city_name}")
-                    geo_response = requests.get(
-                        f"https://nominatim.openstreetmap.org/search",
-                        params={
-                            "q": city_name,
-                            "format": "json",
-                            "limit": 1
-                        },
-                        timeout=5,
-                        headers={"User-Agent": "SmartTravelAssistant/1.0"}
-                    )
-                    if geo_response.ok:
-                        geo_data = geo_response.json()
-                        if geo_data and len(geo_data) > 0:
-                            lat = float(geo_data[0]["lat"])
-                            lon = float(geo_data[0]["lon"])
-                            logger.info(f"[GEOCODE] Found coordinates for {city_name} from OpenStreetMap: {lat}, {lon}")
-                            return (lat, lon)
-                        else:
-                            logger.warning(f"[GEOCODE] OpenStreetMap returned empty results for {city_name}")
+            try:
+                import requests
+                logger.info(f"[GEOCODE] Using OpenStreetMap fallback for {city_name}")
+                geo_response = requests.get(
+                    "https://nominatim.openstreetmap.org/search",
+                    params={
+                        "q": city_name,
+                        "format": "json",
+                        "limit": 1
+                    },
+                    timeout=5,
+                    headers={"User-Agent": "SmartTravelAssistant/1.0"}
+                )
+                
+                if geo_response.ok:
+                    geo_data = geo_response.json()
+                    if geo_data and len(geo_data) > 0:
+                        lat = float(geo_data[0]["lat"])
+                        lon = float(geo_data[0]["lon"])
+                        logger.info(f"[GEOCODE] Found coordinates for {city_name} from OpenStreetMap: {lat}, {lon}")
+                        return (lat, lon)
                     else:
-                        logger.warning(f"[GEOCODE] OpenStreetMap request failed with status {geo_response.status_code} for {city_name}")
-                except Exception as geo_error:
-                    logger.error(f"[GEOCODE] Geocoding fallback failed for {city_name}: {geo_error}")
+                        logger.warning(f"[GEOCODE] OpenStreetMap returned empty results for {city_name}")
+                else:
+                    logger.warning(f"[GEOCODE] OpenStreetMap request failed with status {geo_response.status_code} for {city_name}")
+            except Exception as geo_error:
+                logger.error(f"[GEOCODE] Geocoding fallback failed for {city_name}: {geo_error}")
             
             logger.warning(f"[GEOCODE] Could not find coordinates for {city_name} from any source")
             return None
@@ -469,6 +466,7 @@ class AmadeusService:
         except Exception as e:
             logger.error(f"Failed to get coordinates for {city_name}: {e}")
             return None
+
     
     def get_cheapest_dates(self, origin: str, destination: str, 
                                departure_date_range: str) -> Dict[str, Any]:

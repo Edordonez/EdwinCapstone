@@ -1895,65 +1895,112 @@ def apply_preference_filters_to_activities(
             else:
                 base_convenience_norm = 0.5
             
-            # MODIFY: Apply MUCH STRONGER penalties/boosts for extreme preferences
+            # MODIFY: Apply EXTREME penalties/boosts for high preferences (≥0.7: MUCH stronger, ≥0.6: strong)
+            # Use exponential scaling for budget to dramatically favor cheap activities
             budget_norm = base_budget_norm
             quality_norm = base_quality_norm
             convenience_norm = base_convenience_norm
             
             if preferences:
-                # Budget-heavy (≥0.6): Dramatically penalize expensive items
-                if budget_weight >= 0.6:
-                    try:
-                        if price is not None and prices and len(prices) > 0 and max_price is not None and min_price is not None:
-                            sorted_prices = sorted(prices)
-                            p50_price = sorted_prices[len(sorted_prices) // 2] if len(sorted_prices) > 1 else sorted_prices[0]
-                            if price > p50_price and max_price > p50_price:
-                                # Scale penalty: 0.5 at median → 0.0 at max (penalty up to 70%)
-                                penalty = min(0.7, 0.5 * ((price - p50_price) / (max_price - p50_price + 0.01)))
-                                budget_norm = max(0.0, base_budget_norm - penalty)
-                                if DEBUG_MODE:
-                                    logger.debug(f"[ACTIVITY_SCORE] {activity.get('name')[:40]}: price=${price:.2f} > median=${p50_price:.2f}, penalty={penalty:.3f}, budget_norm: {base_budget_norm:.3f} → {budget_norm:.3f}")
-                            elif DEBUG_MODE:
-                                logger.debug(f"[ACTIVITY_SCORE] {activity.get('name')[:40]}: price=${price:.2f} <= median=${p50_price:.2f}, budget_norm: {base_budget_norm:.3f} (no penalty)")
-                    except Exception as e:
-                        logger.warning(f"[ACTIVITY_SCORE] Error calculating budget penalty: {e}")
+                # Budget-heavy: Use EXPONENTIAL scaling to dramatically favor cheap activities
+                if budget_weight >= 0.7:
+                    # EXTREME: Use squared or exponential transformation for budget_weight >= 0.7
+                    # Transform: budget_norm^2 * (1 + budget_weight) to amplify cheap activities
+                    if base_budget_norm > 0:
+                        # Exponential boost: cheap activities get much higher scores
+                        # Formula: budget_norm^2 * (1 + 0.5 * (budget_weight - 0.7) / 0.3)
+                        boost_factor = 1.0 + 0.8 * ((budget_weight - 0.7) / 0.3)  # 0.7→1.0, 1.0→1.8
+                        budget_norm = min(1.0, (base_budget_norm ** 1.5) * boost_factor)
+                        if DEBUG_MODE:
+                            logger.debug(f"[ACTIVITY_SCORE] 🔴 EXTREME BUDGET MODE: {activity.get('name')[:40]}: price=${price:.2f}, base={base_budget_norm:.3f} → {budget_norm:.3f} (boost_factor={boost_factor:.2f})")
+                    # Penalty: exponentially penalize expensive activities
+                    if price is not None and prices and len(prices) > 0:
+                        sorted_prices = sorted(prices)
+                        p75_price = sorted_prices[int(len(sorted_prices) * 0.75)] if len(sorted_prices) > 3 else sorted_prices[-1]
+                        if price > p75_price and max_price > p75_price:
+                            # Exponential penalty: (price/max)^2 penalty up to 90%
+                            price_ratio = (price - p75_price) / (max_price - p75_price + 0.01)
+                            penalty = min(0.9, 0.7 * (price_ratio ** 1.5))
+                            budget_norm = max(0.0, budget_norm - penalty)
+                            if DEBUG_MODE:
+                                logger.debug(f"[ACTIVITY_SCORE] 🔴 EXTREME PENALTY: {activity.get('name')[:40]}: price=${price:.2f} > p75=${p75_price:.2f}, penalty={penalty:.3f}, budget_norm: {budget_norm:.3f}")
+                elif budget_weight >= 0.6:
+                    # STRONG: Use squared transformation for budget_weight >= 0.6
+                    if base_budget_norm > 0:
+                        budget_norm = min(1.0, base_budget_norm ** 1.3)
+                        if DEBUG_MODE:
+                            logger.debug(f"[ACTIVITY_SCORE] ⚠️ STRONG BUDGET MODE: {activity.get('name')[:40]}: base={base_budget_norm:.3f} → {budget_norm:.3f}")
+                    # Penalty for expensive activities
+                    if price is not None and prices and len(prices) > 0:
+                        sorted_prices = sorted(prices)
+                        p50_price = sorted_prices[len(sorted_prices) // 2] if len(sorted_prices) > 1 else sorted_prices[0]
+                        if price > p50_price and max_price > p50_price:
+                            price_ratio = (price - p50_price) / (max_price - p50_price + 0.01)
+                            penalty = min(0.7, 0.5 * (price_ratio ** 1.2))
+                            budget_norm = max(0.0, budget_norm - penalty)
+                            if DEBUG_MODE:
+                                logger.debug(f"[ACTIVITY_SCORE] ⚠️ STRONG PENALTY: {activity.get('name')[:40]}: price=${price:.2f} > median=${p50_price:.2f}, penalty={penalty:.3f}")
                 
-                # Quality-heavy (≥0.6): Dramatically boost high ratings
-                if quality_weight >= 0.6:
+                # Quality-heavy: Boost high ratings exponentially
+                if quality_weight >= 0.7:
+                    # EXTREME: Exponential boost for high ratings
                     if rating >= 4.5:
-                        # Boost: 0.9 at 4.5 → 1.0 at 5.0 (boost up to 20%)
-                        boost = min(0.2, 0.15 * ((rating - 4.5) / 0.5))
+                        # Squared boost for very high ratings
+                        boost = min(0.3, 0.2 * ((rating - 4.5) / 0.5) ** 1.5)
                         quality_norm = min(1.0, base_quality_norm + boost)
                         if DEBUG_MODE:
-                            logger.debug(f"[ACTIVITY_SCORE] {activity.get('name')[:40]}: rating={rating:.1f} >= 4.5, boost={boost:.3f}, quality_norm: {base_quality_norm:.3f} → {quality_norm:.3f}")
+                            logger.debug(f"[ACTIVITY_SCORE] ⭐ EXTREME QUALITY BOOST: {activity.get('name')[:40]}: rating={rating:.1f} >= 4.5, boost={boost:.3f}, quality_norm: {base_quality_norm:.3f} → {quality_norm:.3f}")
                     elif rating < 4.0:
-                        # Penalty: reduce significantly (penalty up to 40%)
-                        penalty = min(0.4, 0.3 * ((4.0 - rating) / 4.0))
+                        # Exponential penalty for low ratings
+                        penalty = min(0.6, 0.4 * ((4.0 - rating) / 4.0) ** 1.5)
                         quality_norm = max(0.0, base_quality_norm - penalty)
                         if DEBUG_MODE:
-                            logger.debug(f"[ACTIVITY_SCORE] {activity.get('name')[:40]}: rating={rating:.1f} < 4.0, penalty={penalty:.3f}, quality_norm: {base_quality_norm:.3f} → {quality_norm:.3f}")
+                            logger.debug(f"[ACTIVITY_SCORE] ⭐ EXTREME QUALITY PENALTY: {activity.get('name')[:40]}: rating={rating:.1f} < 4.0, penalty={penalty:.3f}")
+                elif quality_weight >= 0.6:
+                    # STRONG: Boost for high ratings
+                    if rating >= 4.5:
+                        boost = min(0.2, 0.15 * ((rating - 4.5) / 0.5))
+                        quality_norm = min(1.0, base_quality_norm + boost)
+                    elif rating < 4.0:
+                        penalty = min(0.4, 0.3 * ((4.0 - rating) / 4.0))
+                        quality_norm = max(0.0, base_quality_norm - penalty)
                 
-                # Convenience-heavy (≥0.6): Dramatically prioritize short activities
-                if convenience_weight >= 0.6:
-                    try:
-                        if duration_hours is not None and durations and len(durations) > 0 and max_duration is not None and min_duration is not None:
-                            sorted_durations = sorted(durations)
-                            p50_duration = sorted_durations[len(sorted_durations) // 2] if len(sorted_durations) > 1 else sorted_durations[0]
-                            if duration_hours <= p50_duration:
-                                # Boost: shorter = much higher (boost up to 30%)
-                                boost = min(0.3, 0.25 * ((p50_duration - duration_hours) / (p50_duration + 0.1)))
-                                convenience_norm = min(1.0, base_convenience_norm + boost)
+                # Convenience-heavy: Exponential boost for short duration activities
+                if convenience_weight >= 0.7:
+                    # EXTREME: Exponential transformation for convenience_weight >= 0.7
+                    if duration_hours is not None and durations and len(durations) > 0:
+                        sorted_durations = sorted(durations)
+                        p25_duration = sorted_durations[int(len(sorted_durations) * 0.25)] if len(sorted_durations) > 3 else sorted_durations[0]
+                        if duration_hours <= p25_duration:
+                            # Exponential boost: shorter activities get much higher scores
+                            boost_factor = 1.0 + 0.6 * ((convenience_weight - 0.7) / 0.3)
+                            duration_ratio = (p25_duration - duration_hours) / (p25_duration + 0.1)
+                            boost = min(0.4, 0.3 * (duration_ratio ** 1.5) * boost_factor)
+                            convenience_norm = min(1.0, base_convenience_norm + boost)
+                            if DEBUG_MODE:
+                                logger.debug(f"[ACTIVITY_SCORE] 🚀 EXTREME CONVENIENCE BOOST: {activity.get('name')[:40]}: duration={duration_hours:.1f}h <= p25={p25_duration:.1f}h, boost={boost:.3f}, convenience_norm: {base_convenience_norm:.3f} → {convenience_norm:.3f}")
+                        else:
+                            # Exponential penalty for long activities
+                            p75_duration = sorted_durations[int(len(sorted_durations) * 0.75)] if len(sorted_durations) > 3 else sorted_durations[-1]
+                            if duration_hours > p75_duration and max_duration > p75_duration:
+                                duration_ratio = (duration_hours - p75_duration) / (max_duration - p75_duration + 0.1)
+                                penalty = min(0.7, 0.5 * (duration_ratio ** 1.5))
+                                convenience_norm = max(0.0, base_convenience_norm - penalty)
                                 if DEBUG_MODE:
-                                    logger.debug(f"[ACTIVITY_SCORE] {activity.get('name')[:40]}: duration={duration_hours:.1f}h <= median={p50_duration:.1f}h, boost={boost:.3f}, convenience_norm: {base_convenience_norm:.3f} → {convenience_norm:.3f}")
-                            else:
-                                # Penalty: longer = much lower (penalty up to 50%)
-                                if max_duration > p50_duration:
-                                    penalty = min(0.5, 0.4 * ((duration_hours - p50_duration) / (max_duration - p50_duration + 0.1)))
-                                    convenience_norm = max(0.0, base_convenience_norm - penalty)
-                                    if DEBUG_MODE:
-                                        logger.debug(f"[ACTIVITY_SCORE] {activity.get('name')[:40]}: duration={duration_hours:.1f}h > median={p50_duration:.1f}h, penalty={penalty:.3f}, convenience_norm: {base_convenience_norm:.3f} → {convenience_norm:.3f}")
-                    except Exception as e:
-                        logger.warning(f"[ACTIVITY_SCORE] Error calculating convenience penalty/boost: {e}")
+                                    logger.debug(f"[ACTIVITY_SCORE] 🚀 EXTREME CONVENIENCE PENALTY: {activity.get('name')[:40]}: duration={duration_hours:.1f}h > p75={p75_duration:.1f}h, penalty={penalty:.3f}")
+                elif convenience_weight >= 0.6:
+                    # STRONG: Boost for short activities
+                    if duration_hours is not None and durations and len(durations) > 0:
+                        sorted_durations = sorted(durations)
+                        p50_duration = sorted_durations[len(sorted_durations) // 2] if len(sorted_durations) > 1 else sorted_durations[0]
+                        if duration_hours <= p50_duration:
+                            boost = min(0.3, 0.25 * ((p50_duration - duration_hours) / (p50_duration + 0.1)))
+                            convenience_norm = min(1.0, base_convenience_norm + boost)
+                        else:
+                            p75_duration = sorted_durations[int(len(sorted_durations) * 0.75)] if len(sorted_durations) > 3 else sorted_durations[-1]
+                            if duration_hours > p75_duration and max_duration > p75_duration:
+                                penalty = min(0.5, 0.4 * ((duration_hours - p75_duration) / (max_duration - p75_duration + 0.1)))
+                                convenience_norm = max(0.0, base_convenience_norm - penalty)
             
             # Calculate total_score: normalized values (0-1) * weights
             # ALWAYS uses this formula
@@ -1969,15 +2016,40 @@ def apply_preference_filters_to_activities(
             activity['convenience_score'] = round(convenience_norm * 100, 2)
             activity['total_score'] = round(total_score, 4)  # Keep more precision for sorting
             
-            # ADD: Debug logging for each activity (only in DEBUG mode)
+            # ADD: Debug logging for each activity - raw scores and total_score (always logged for sorting verification)
+            logger.debug(
+                f"[ACTIVITY_SCORE] Activity: {activity.get('name')[:50]} | "
+                f"budget_score={activity['budget_score']:.2f} | "
+                f"quality_score={activity['quality_score']:.2f} | "
+                f"convenience_score={activity['convenience_score']:.2f} | "
+                f"total_score={activity['total_score']:.6f}"
+            )
+            
+            # ADD: Detailed debug logging for each activity (only in DEBUG mode)
             if DEBUG_MODE:
+                budget_contrib = budget_norm * budget_weight
+                quality_contrib = quality_norm * quality_weight
+                convenience_contrib = convenience_norm * convenience_weight
                 logger.info(
-                    f"[ACTIVITY_SCORE] Activity: {activity.get('name')[:50]} | "
-                    f"Raw: price=${price:.2f}, rating={rating:.1f}, duration={duration_hours:.1f}h | "
-                    f"Normalized: budget={budget_norm:.3f}, quality={quality_norm:.3f}, convenience={convenience_norm:.3f} | "
-                    f"Weights: b={budget_weight:.3f}, q={quality_weight:.3f}, c={convenience_weight:.3f} | "
-                    f"Contributions: b*{budget_weight:.3f}={budget_norm*budget_weight:.4f}, q*{quality_weight:.3f}={quality_norm*quality_weight:.4f}, c*{convenience_weight:.3f}={convenience_norm*convenience_weight:.4f} | "
-                    f"Total={total_score:.4f}"
+                    f"[ACTIVITY_SCORE] ─────────────────────────────────────────────────────────"
+                )
+                logger.info(
+                    f"[ACTIVITY_SCORE] Activity: {activity.get('name')[:60]}"
+                )
+                logger.info(
+                    f"[ACTIVITY_SCORE]   Raw values: price=${price:.2f} | rating={rating:.1f}/5.0 | duration={duration_hours:.1f}h"
+                )
+                logger.info(
+                    f"[ACTIVITY_SCORE]   Normalized (0-1): budget={budget_norm:.4f} | quality={quality_norm:.4f} | convenience={convenience_norm:.4f}"
+                )
+                logger.info(
+                    f"[ACTIVITY_SCORE]   Weights: budget={budget_weight:.3f} ({budget_weight*100:.1f}%) | quality={quality_weight:.3f} ({quality_weight*100:.1f}%) | convenience={convenience_weight:.3f} ({convenience_weight*100:.1f}%)"
+                )
+                logger.info(
+                    f"[ACTIVITY_SCORE]   Contributions: budget={budget_contrib:.4f} | quality={quality_contrib:.4f} | convenience={convenience_contrib:.4f}"
+                )
+                logger.info(
+                    f"[ACTIVITY_SCORE]   ⭐ TOTAL_SCORE = {total_score:.6f}"
                 )
         
         # E. Sort activities STRICTLY by total_score DESC
@@ -1992,38 +2064,61 @@ def apply_preference_filters_to_activities(
         # Combine: regular first, then long_tour
         activities = regular_activities + long_tour_activities
         
+        # ADD: Log sorted scores for verification (after sorting)
+        logger.debug(f"[ACTIVITY_SCORE] ═══ SORTED ACTIVITIES (for preference comparison) ═══")
+        for idx, act in enumerate(activities, 1):
+            logger.debug(
+                f"[ACTIVITY_SCORE] #{idx:2d}. {act.get('name')[:50]} | "
+                f"budget={act.get('budget_score', 0):.2f} | "
+                f"quality={act.get('quality_score', 0):.2f} | "
+                f"convenience={act.get('convenience_score', 0):.2f} | "
+                f"total_score={act.get('total_score', 0):.6f}"
+            )
+        
         # ADD: Log top 10 results with weight influence
+        logger.info(f"[ACTIVITY_SCORE] ════════════════════════════════════════════════════════════════")
         logger.info(f"[ACTIVITY_SCORE] ═══ SORTING COMPLETE (context={context_label}) ═══")
+        logger.info(f"[ACTIVITY_SCORE] ════════════════════════════════════════════════════════════════")
         logger.info(f"[ACTIVITY_SCORE] Sorted {len(regular_activities)} regular + {len(long_tour_activities)} long_tour activities")
         logger.info(f"[ACTIVITY_SCORE] Weights applied: budget={budget_weight:.3f} ({budget_weight*100:.1f}%), quality={quality_weight:.3f} ({quality_weight*100:.1f}%), convenience={convenience_weight:.3f} ({convenience_weight*100:.1f}%)")
-        logger.info(f"[ACTIVITY_SCORE] ═══ TOP 10 ACTIVITIES (by total_score DESC) ═══")
+        logger.info(f"[ACTIVITY_SCORE] ═══ TOP 10 ACTIVITIES (sorted by total_score DESC) ═══")
         
         top_10 = activities[:10] if len(activities) >= 10 else activities
         for idx, act in enumerate(top_10, 1):
-            name = act.get('name', 'Unknown')[:50]  # Truncate long names
+            name = act.get('name', 'Unknown')[:60]  # Truncate long names
             price_val = act.get('price', {}).get('amount') if isinstance(act.get('price'), dict) else act.get('price')
             rating_val = act.get('rating', 'N/A')
             duration_val = act.get('minimumDuration') or act.get('duration', 'N/A')
-            budget_s = act.get('budget_score', 0)  # 0-100 range
-            quality_s = act.get('quality_score', 0)  # 0-100 range
-            convenience_s = act.get('convenience_score', 0)  # 0-100 range
-            total_s = act.get('total_score', 0)  # 0-1 range
+            budget_s = act.get('budget_score', 0) / 100.0  # Convert to 0-1 range
+            quality_s = act.get('quality_score', 0) / 100.0  # Convert to 0-1 range
+            convenience_s = act.get('convenience_score', 0) / 100.0  # Convert to 0-1 range
+            total_s = act.get('total_score', 0)  # Already 0-1 range
             
             # Calculate weighted contributions (using 0-1 normalized values)
-            budget_contrib = (budget_s / 100.0) * budget_weight
-            quality_contrib = (quality_s / 100.0) * quality_weight
-            convenience_contrib = (convenience_s / 100.0) * convenience_weight
+            budget_contrib = budget_s * budget_weight
+            quality_contrib = quality_s * quality_weight
+            convenience_contrib = convenience_s * convenience_weight
             
             logger.info(
-                f"[ACTIVITY_SCORE] #{idx}: {name} | "
-                f"total_score={total_s:.4f} | "
-                f"budget={budget_s:.1f}*{budget_weight:.3f}={budget_contrib:.4f} | "
-                f"quality={quality_s:.1f}*{quality_weight:.3f}={quality_contrib:.4f} | "
-                f"convenience={convenience_s:.1f}*{convenience_weight:.3f}={convenience_contrib:.4f} | "
-                f"Raw: price=${price_val} rating={rating_val} duration={duration_val}"
+                f"[ACTIVITY_SCORE] #{idx:2d}. {name}"
+            )
+            logger.info(
+                f"[ACTIVITY_SCORE]     Total Score: {total_s:.6f} | Raw: price=${price_val} | rating={rating_val} | duration={duration_val}"
+            )
+            logger.info(
+                f"[ACTIVITY_SCORE]     Contributions: budget={budget_contrib:.4f} ({budget_s:.3f}*{budget_weight:.3f}) | quality={quality_contrib:.4f} ({quality_s:.3f}*{quality_weight:.3f}) | convenience={convenience_contrib:.4f} ({convenience_s:.3f}*{convenience_weight:.3f})"
             )
         
         logger.info(f"[ACTIVITY_SCORE] ═══ END SCORING REPORT ═══")
+        logger.info(f"[ACTIVITY_SCORE] ════════════════════════════════════════════════════════════════")
+        
+        # ADD: Log top 3 for quick comparison (budget 9% vs 71% test)
+        logger.info(f"[ACTIVITY_SCORE] ─── TOP 3 SUMMARY (for weight comparison test) ───")
+        for idx, act in enumerate(top_10[:3], 1):
+            name = act.get('name', 'Unknown')[:50]
+            price_val = act.get('price', {}).get('amount') if isinstance(act.get('price'), dict) else act.get('price')
+            total_s = act.get('total_score', 0)
+            logger.info(f"[ACTIVITY_SCORE] #{idx}: {name} | Score: {total_s:.6f} | Price: ${price_val}")
         
     except Exception as e:
         logger.error(f"[ACTIVITY_SCORE] Failed to score activities ({context_label}): {e}", exc_info=True)
@@ -3244,6 +3339,10 @@ async def chat(req: ChatRequest):
                         logger.info(f"Calling activity search with params: {intent['params']}")
                         # ADD: Log preferences before activity search
                         logger.info(f"[PREF_TRACE] Activity search detected. Preferences for scoring: {req.preferences}")
+                        if req.preferences:
+                            logger.info(f"[PREF_TRACE] ✅ Preferences will be applied to activities: budget={req.preferences.get('budget', 0):.3f}, quality={req.preferences.get('quality', 0):.3f}, convenience={req.preferences.get('convenience', 0):.3f}")
+                        else:
+                            logger.warning(f"[PREF_TRACE] ⚠️ No preferences available for activity scoring!")
                         
                         if "latitude" in intent["params"] and "longitude" in intent["params"]:
                             # Direct coordinate search
