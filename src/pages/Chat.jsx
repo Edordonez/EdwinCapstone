@@ -310,13 +310,16 @@ export default function Chat({ pendingMessage, onPendingMessageSent, onShowDashb
   useEffect(() => {
     const initializeChat = async () => {
       // Skip initialization if already initialized and onboarding is complete
+      // BUT: Don't skip if we're restoring conversation (shouldRestore check comes later)
       // This prevents resetting state when component re-renders after preference form submission
       // Also check if messages already exist (from preference form submission or previous initialization)
-      if (initializedRef.current && (onboardingComplete || messages.length > 0)) {
+      const shouldRestore = location.state?.restoreConversation || false;
+      if (initializedRef.current && (onboardingComplete || messages.length > 0) && !shouldRestore) {
         console.log('[Chat] Skipping initialization - already initialized', {
           initialized: initializedRef.current,
           onboardingComplete,
-          messagesCount: messages.length
+          messagesCount: messages.length,
+          shouldRestore
         });
         return;
       }
@@ -326,9 +329,7 @@ export default function Chat({ pendingMessage, onPendingMessageSent, onShowDashb
         const navigationEntry = performance.getEntriesByType('navigation')[0];
         const isRefresh = navigationEntry && navigationEntry.type === 'reload';
         
-        // Check if we should restore conversation (from Back to Results flow)
-        // This check must come BEFORE refresh check to preserve conversation when navigating back
-        const shouldRestore = location.state?.restoreConversation || false;
+        // shouldRestore is already defined above, just get hasItinerary
         const hasItinerary = location.state?.hasExistingItinerary || false;
         
         console.log('Chat initialization:', {
@@ -366,6 +367,17 @@ export default function Chat({ pendingMessage, onPendingMessageSent, onShowDashb
             if (savedConv.userPreferences) {
               setUserPreferences(savedConv.userPreferences);
             }
+            
+            // Restore dashboardData from tripState or saved conversation
+            const tripState = loadTripState();
+            const dashboardDataToRestore = savedConv.dashboardData || tripState?.dashboardData;
+            if (dashboardDataToRestore && onShowDashboard) {
+              // Restore dashboardData by calling onShowDashboard
+              // This will update App.js state and show the dashboard
+              onShowDashboard(dashboardDataToRestore);
+              console.log('[Chat] Restored dashboardData from tripState/saved conversation');
+            }
+            
             setIsLoadingContext(false);
             return; // Don't initialize new chat if restoring saved conversation
           } else {
@@ -388,6 +400,14 @@ export default function Chat({ pendingMessage, onPendingMessageSent, onShowDashb
               if (savedConv.userPreferences) {
                 setUserPreferences(savedConv.userPreferences);
               }
+              
+              // Restore dashboardData from tripState
+              const dashboardDataToRestore = savedConv.dashboardData || tripState?.dashboardData;
+              if (dashboardDataToRestore && onShowDashboard) {
+                onShowDashboard(dashboardDataToRestore);
+                console.log('[Chat] Restored dashboardData from tripState (fallback)');
+              }
+              
               if (tripState?.currentItinerary) {
                 setHasExistingItinerary(true);
               }
@@ -397,6 +417,14 @@ export default function Chat({ pendingMessage, onPendingMessageSent, onShowDashb
             
             // Still no saved conversation, but skip preference form
             console.log('Back to Results: No saved conversation found, initializing welcome message');
+            
+            // Try to restore dashboardData even if no conversation
+            const dashboardDataToRestore = tripState?.dashboardData;
+            if (dashboardDataToRestore && onShowDashboard) {
+              onShowDashboard(dashboardDataToRestore);
+              console.log('[Chat] Restored dashboardData from tripState (no conversation found)');
+            }
+            
             // Initialize chat with welcome message for continuing itinerary
             const locationContext = await getLocationContext();
             setContext(locationContext);
@@ -500,10 +528,23 @@ export default function Chat({ pendingMessage, onPendingMessageSent, onShowDashb
   useEffect(() => {
     // Save conversation only if there are messages (not just welcome message)
     if (messages.length > 1 && sessionId) {
-      saveConversation(messages, sessionId, context, userPreferences);
-      console.log('Auto-saved conversation:', messages.length, 'messages');
+      saveConversation(messages, sessionId, context, userPreferences, dashboardData);
+      console.log('Auto-saved conversation:', messages.length, 'messages', 'with dashboardData:', !!dashboardData);
     }
-  }, [messages, sessionId, context, userPreferences]);
+  }, [messages, sessionId, context, userPreferences, dashboardData]);
+  
+  // Restore dashboardData from tripState on mount if not already shown
+  useEffect(() => {
+    // Only restore if dashboard is not already shown and we have onShowDashboard
+    if (!showDashboard && onShowDashboard) {
+      const tripState = loadTripState();
+      const savedDashboardData = tripState?.dashboardData;
+      if (savedDashboardData) {
+        console.log('[Chat] Restoring dashboardData from tripState on mount');
+        onShowDashboard(savedDashboardData);
+      }
+    }
+  }, []); // Only run on mount
 
   useEffect(() => {
     if (scrollRef.current) {
@@ -1442,13 +1483,67 @@ export default function Chat({ pendingMessage, onPendingMessageSent, onShowDashb
                 };
                 
                 // Navigate directly with routeInfo instead of parsing message
+                // IMPORTANT: Save conversation and dashboardData BEFORE navigating
+                // This ensures data is persisted even if user navigates quickly
+                if (messages.length > 0 && sessionId) {
+                  saveConversation(messages, sessionId, context, userPreferences, dashboardData);
+                  console.log('[Chat] Saved conversation before navigating to itinerary:', messages.length, 'messages');
+                }
+                
+                // Load all available data from tripState and dashboardData to pass to itinerary
+                const currentTripState = loadTripState();
                 const existingItinerary = loadCurrentItinerary();
+                
+                // Get flights from dashboardData first (most recent), then tripState
+                const dashboardOutboundFlights = dashboardData?.outboundFlights || [];
+                const dashboardReturnFlights = dashboardData?.returnFlights || [];
+                const tripStateFlights = currentTripState?.flights || [];
+                const tripStateOutboundFlights = currentTripState?.outboundFlights || [];
+                const tripStateReturnFlights = currentTripState?.returnFlights || [];
+                
+                // Use dashboard flights if available, otherwise use tripState
+                const finalOutboundFlights = dashboardOutboundFlights.length > 0 ? dashboardOutboundFlights : tripStateOutboundFlights;
+                const finalReturnFlights = dashboardReturnFlights.length > 0 ? dashboardReturnFlights : tripStateReturnFlights;
+                const finalFlights = finalOutboundFlights.length > 0 || finalReturnFlights.length > 0 
+                  ? [...finalOutboundFlights, ...finalReturnFlights]
+                  : tripStateFlights;
+                
+                // Get hotels and activities from tripState (accommodation is stored as hotels)
+                const tripStateHotels = currentTripState?.accommodation || currentTripState?.hotels || [];
+                const tripStateActivities = currentTripState?.activities || [];
+                
+                // Get selected items from tripState (user's explicit selections)
+                const selectedOutboundFlight = currentTripState?.selectedOutboundFlight || null;
+                const selectedReturnFlight = currentTripState?.selectedReturnFlight || null;
+                const selectedHotel = currentTripState?.selectedHotel || null;
+                const mustDoActivities = currentTripState?.mustDoActivities || [];
+                
+                console.log('Navigating to itinerary with data:', {
+                  flights: finalFlights.length,
+                  outboundFlights: finalOutboundFlights.length,
+                  returnFlights: finalReturnFlights.length,
+                  hotels: tripStateHotels.length,
+                  activities: tripStateActivities.length,
+                  selectedOutbound: !!selectedOutboundFlight,
+                  selectedReturn: !!selectedReturnFlight,
+                  selectedHotel: !!selectedHotel,
+                  mustDoActivities: mustDoActivities.length,
+                  fromDashboard: dashboardOutboundFlights.length > 0 || dashboardReturnFlights.length > 0
+                });
+                
                 navigate('/itinerary', {
                   state: {
                     routeInfo: routeInfoForNav,
-                    flights: [],
-                    outboundFlights: [],
-                    returnFlights: [],
+                    flights: finalFlights,
+                    outboundFlights: finalOutboundFlights,
+                    returnFlights: finalReturnFlights,
+                    hotels: tripStateHotels,
+                    activities: tripStateActivities,
+                    // Pass selected items explicitly
+                    selectedOutboundFlight: selectedOutboundFlight,
+                    selectedReturnFlight: selectedReturnFlight,
+                    selectedHotel: selectedHotel,
+                    mustDoActivities: mustDoActivities,
                     preferences: userPreferences ? { preferences: userPreferences } : null,
                     updateExistingItinerary: false,
                     existingItineraryData: null
@@ -1544,6 +1639,13 @@ export default function Chat({ pendingMessage, onPendingMessageSent, onShowDashb
             const { outboundFlights, returnFlights } = flightData;
             const optimalOutbound = outboundFlights?.find(f => f.optimalFlight || f.isOptimal);
             const optimalReturn = returnFlights?.find(f => f.optimalFlight || f.isOptimal);
+            
+            // Immediately save conversation when dashboardData is received (before showing dashboard)
+            // This ensures conversation is saved even if user navigates away quickly
+            if (messages.length > 0 && sessionId) {
+              saveConversation(messages, sessionId, context, userPreferences, flightData);
+              console.log('[Chat] Immediately saved conversation with dashboardData:', messages.length, 'messages');
+            }
             
             // Update must-do activities with full details from API response
             if (detectedActivities.length > 0) {
@@ -1836,6 +1938,12 @@ export default function Chat({ pendingMessage, onPendingMessageSent, onShowDashb
         console.log('Saved selected return flight:', optimalReturn.flightNumber);
       }
       
+      // IMPORTANT: Save conversation and dashboardData BEFORE navigating
+      if (messages.length > 0 && sessionId) {
+        saveConversation(messages, sessionId, context, userPreferences, dashboardData);
+        console.log('[Chat] Saved conversation before navigating (handleGenerateItinerary):', messages.length, 'messages');
+      }
+      
       // Navigate with existing dashboard data
       navigate('/itinerary', {
         state: {
@@ -1909,6 +2017,12 @@ export default function Chat({ pendingMessage, onPendingMessageSent, onShowDashb
         date: departureDate || new Date().toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }),
         returnDate: returnDate || null
       };
+      
+      // IMPORTANT: Save conversation BEFORE navigating
+      if (messages.length > 0 && sessionId) {
+        saveConversation(messages, sessionId, context, userPreferences, dashboardData);
+        console.log('[Chat] Saved conversation before navigating (routeData path):', messages.length, 'messages');
+      }
       
       navigate('/itinerary', {
         state: {
@@ -2119,6 +2233,12 @@ export default function Chat({ pendingMessage, onPendingMessageSent, onShowDashb
     
     console.log('=== Final routeInfo ===');
     console.log(routeInfo);
+    
+    // IMPORTANT: Save conversation BEFORE navigating (final fallback path)
+    if (messages.length > 0 && sessionId) {
+      saveConversation(messages, sessionId, context, userPreferences, dashboardData);
+      console.log('[Chat] Saved conversation before navigating (final path):', messages.length, 'messages');
+    }
     
     // Update TripState with route info before navigation
     // Normalize departure city name

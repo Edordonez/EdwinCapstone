@@ -6,6 +6,7 @@ import './styles/site.css';
 import Home from './pages/Home';
 import Chat from './pages/Chat';
 import OptimizedItinerary from './pages/OptimizedItinerary';
+import ItineraryPage from './pages/ItineraryPage';
 import { FlightDashboard } from './components/dashboard/FlightDashboard';
 import { recordTripSelection, loadTripState, saveTripState, updateTripRoute } from './utils/tripState';
 
@@ -76,6 +77,16 @@ function App() {
         
         console.log('[App] Saved optimalFlight to tripState:', optimalFlight);
       }
+      
+      // Save dashboardData to tripState for persistence
+      const currentState = loadTripState();
+      saveTripState({
+        ...currentState,
+        dashboardData: data, // Save the entire dashboardData
+        outboundFlights: outboundFlights || [],
+        returnFlights: returnFlights || []
+      });
+      console.log('[App] Saved dashboardData to tripState');
     }
   };
 
@@ -142,6 +153,10 @@ function App() {
       />
       <Route 
         path="/itinerary" 
+        element={<ItineraryPage />} 
+      />
+      <Route 
+        path="/itinerary-old" 
         element={<OptimizedItinerary />} 
       />
     </Routes>

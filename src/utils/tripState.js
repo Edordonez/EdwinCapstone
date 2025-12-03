@@ -399,7 +399,7 @@ export const clearCurrentItinerary = () => {
 };
 
 // Save conversation messages (for Back to Results -> Chat flow)
-export const saveConversation = (messages, sessionId = null, context = null, userPreferences = null) => {
+export const saveConversation = (messages, sessionId = null, context = null, userPreferences = null, dashboardData = null) => {
   const state = loadTripState();
   return saveTripState({
     ...state,
@@ -408,9 +408,12 @@ export const saveConversation = (messages, sessionId = null, context = null, use
       sessionId: sessionId,
       context: context,
       userPreferences: userPreferences,
+      dashboardData: dashboardData, // Include dashboardData in saved conversation
       savedAt: new Date().toISOString()
     },
-    hasSavedConversation: true
+    hasSavedConversation: true,
+    // Also save dashboardData at top level for easy access
+    dashboardData: dashboardData || state.dashboardData
   });
 };
 

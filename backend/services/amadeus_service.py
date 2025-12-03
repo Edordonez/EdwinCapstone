@@ -394,14 +394,14 @@ class AmadeusService:
             logger.error(f"Location search failed: {e}")
             return {"error": str(e), "locations": []}
     
-        def get_city_coordinates(self, city_name: str) -> Optional[Tuple[float, float]]:
+    def get_city_coordinates(self, city_name: str) -> Optional[Tuple[float, float]]:
         """
         Get coordinates (latitude, longitude) for a city name
         Uses the location search API to find city coordinates
         
         Args:
             city_name: Name of the city
-            
+        
         Returns:
             Tuple of (latitude, longitude) or None if not found
         """
@@ -462,7 +462,6 @@ class AmadeusService:
             
             logger.warning(f"[GEOCODE] Could not find coordinates for {city_name} from any source")
             return None
-            
         except Exception as e:
             logger.error(f"Failed to get coordinates for {city_name}: {e}")
             return None

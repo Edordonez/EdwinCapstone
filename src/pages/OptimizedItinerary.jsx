@@ -1,7 +1,6 @@
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
 import { ScrollArea } from '../components/ui/scroll-area';
-import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Cell } from 'recharts';
 import { saveCurrentItinerary, loadCurrentItinerary, saveConversation, saveOptimizedItinerary, loadOptimizedItinerary, loadTripState, saveTripState } from '../utils/tripState';
 
 // Helper function to parse duration string to hours
@@ -507,7 +506,19 @@ export default function OptimizedItinerary() {
               stops: newReturnFlight.stops || 0,
               price: newReturnFlight.price || 0,
               airline: newReturnFlight.airline,
-              flightNumber: newReturnFlight.flightNumber
+              flightNumber: newReturnFlight.flightNumber,
+              // Include all additional flight details
+              cabin: newReturnFlight.cabin || newReturnFlight.cabinClass || null,
+              baggage: newReturnFlight.baggage || newReturnFlight.baggageAllowance || null,
+              departureAirport: newReturnFlight.departureAirport || null,
+              arrivalAirport: newReturnFlight.arrivalAirport || null,
+              departureCode: newReturnFlight.departureCode || null,
+              arrivalCode: newReturnFlight.arrivalCode || null,
+              departureTime: newReturnFlight.departureTime || departureTime,
+              arrivalTime: newReturnFlight.arrivalTime || null,
+              bookingLink: newReturnFlight.bookingLink || newReturnFlight.link || null,
+              // Preserve any other flight properties
+              ...(newReturnFlight.details || {})
             }
           };
           
@@ -1081,6 +1092,7 @@ export default function OptimizedItinerary() {
         }
       }
       
+      // Preserve all flight details including cabin, baggage, booking links, etc.
       const flightsData = flightsToMap.length > 0 ? flightsToMap.map(flight => ({
         id: flight.id || flight.flightNumber || `flight-${Math.random()}`,
         price: flight.price || 0,
@@ -1089,7 +1101,20 @@ export default function OptimizedItinerary() {
         flightNumber: flight.flightNumber || '',
         departure: flight.departure || '',
         arrival: flight.arrival || '',
-        stops: flight.stops || 0
+        stops: flight.stops || 0,
+        // Preserve additional flight details
+        cabin: flight.cabin || flight.cabinClass || null,
+        baggage: flight.baggage || flight.baggageAllowance || null,
+        departureAirport: flight.departureAirport || flight.origin || null,
+        arrivalAirport: flight.arrivalAirport || flight.destination || null,
+        departureCode: flight.departureCode || flight.originCode || null,
+        arrivalCode: flight.arrivalCode || flight.destinationCode || null,
+        departureTime: flight.departureTime || null,
+        arrivalTime: flight.arrivalTime || null,
+        bookingLink: flight.bookingLink || flight.link || null,
+        // Preserve any other custom fields
+        ...(flight.metadata || {}),
+        ...(flight.details || {})
       })) : [];
       
       console.log('flightsData after building:', {
@@ -1515,11 +1540,30 @@ export default function OptimizedItinerary() {
         endDate: tripEndDate.toISOString().split('T')[0]
       });
       
+      // Load selected items from tripState (user's explicit selections take highest priority)
+      const selectedOutboundFromState = currentTripState?.selectedOutboundFlight || null;
+      const selectedReturnFromState = currentTripState?.selectedReturnFlight || null;
+      const selectedHotelFromTripState = currentTripState?.selectedHotel || null;
+      const mustDoActivitiesFromState = currentTripState?.mustDoActivities || [];
+      
+      console.log('Selected items from tripState:', {
+        selectedOutbound: !!selectedOutboundFromState,
+        selectedReturn: !!selectedReturnFromState,
+        selectedHotel: !!selectedHotelFromTripState,
+        mustDoActivities: mustDoActivitiesFromState.length
+      });
+      
       // Use the same flight and hotel data that will be displayed in Summary
-      // Priority: selectedOutboundFlight > optimalOutboundFlight > result.flight
-      const finalOutboundFlight = selectedOutbound || optimalOutboundFlight || outboundFlight || result.flight || null;
-      const finalReturnFlight = selectedReturn || optimalReturnFlight || returnFlight || null;
-      const finalHotelForTimeline = selectedHotelFromState || result.hotel || finalHotelForItinerary || null;
+      // Priority: selectedOutboundFlight (from tripState) > selectedOutbound (from location.state) > optimalOutboundFlight > result.flight
+      const finalOutboundFlight = selectedOutboundFromState || selectedOutbound || optimalOutboundFlight || outboundFlight || result.flight || null;
+      const finalReturnFlight = selectedReturnFromState || selectedReturn || optimalReturnFlight || returnFlight || null;
+      const finalHotelForTimeline = selectedHotelFromTripState || selectedHotelFromState || result.hotel || finalHotelForItinerary || null;
+      
+      // Combine must-do activities with fetched activities
+      const allActivitiesForItinerary = [
+        ...mustDoActivitiesFromState,
+        ...(activitiesData || [])
+      ];
       
       console.log('createDayByDayItinerary inputs:', {
         finalOutboundFlight: finalOutboundFlight ? {
@@ -1553,14 +1597,14 @@ export default function OptimizedItinerary() {
       });
       
       const { days, hotelStays } = createDayByDayItinerary(
-        finalOutboundFlight, // Use final outbound flight
-        finalHotelForTimeline, // Use final hotel
+        finalOutboundFlight, // Use final outbound flight (selected > optimal)
+        finalHotelForTimeline, // Use final hotel (selected > optimal)
         result.activity ? [result.activity] : [],
-        activitiesData,
+        allActivitiesForItinerary, // Include must-do activities + fetched activities
         currentRouteInfo,
         departureDate, // startDate
         tripEndDate, // endDate
-        finalReturnFlight // Use final return flight
+        finalReturnFlight // Use final return flight (selected > optimal)
       );
 
       const finalItineraryData = {
@@ -1593,6 +1637,36 @@ export default function OptimizedItinerary() {
     } catch (err) {
       console.error('Error generating itinerary:', err);
       setError(err.message || 'Failed to generate itinerary. Please try again.');
+      
+      // Even on error, create a minimal structure if we have route info
+      const routeInfoFromState = location.state?.routeInfo || {};
+      const currentTripState = loadTripState();
+      const hasRoute = (routeInfoFromState.destination && routeInfoFromState.destination !== 'Unknown') ||
+                       (currentTripState?.destination && currentTripState.destination !== 'Unknown');
+      
+      if (hasRoute) {
+        const minimalData = {
+          ok: true,
+          flight: null,
+          hotel: null,
+          activity: null,
+          days: [],
+          hotelStays: [],
+          routeInfo: {
+            departure: routeInfoFromState.departure || currentTripState?.origin || 'Unknown',
+            destination: routeInfoFromState.destination || currentTripState?.destination || 'Unknown',
+            departureCode: routeInfoFromState.departureCode || currentTripState?.originCode || '',
+            destinationCode: routeInfoFromState.destinationCode || currentTripState?.destinationCode || '',
+            date: routeInfoFromState.date || currentTripState?.startDate || '',
+            returnDate: routeInfoFromState.returnDate || currentTripState?.endDate || null
+          },
+          hotelsData: [],
+          activitiesData: [],
+          total_price: 0,
+          total_score: 0
+        };
+        setItineraryData(minimalData);
+      }
     } finally {
       setLoading(false);
     }
@@ -1776,20 +1850,30 @@ export default function OptimizedItinerary() {
       const durationStr = (duration || '').toString().toLowerCase();
       
       // Avoid conflicts with existing slots
+      // Expanded time slots: Early Morning, Morning, Afternoon, Evening, Late Evening
+      const allTimeSlots = ['Early Morning', 'Morning', 'Afternoon', 'Evening', 'Late Evening'];
       const getAvailableSlot = (preferred) => {
         if (!existingSlots.includes(preferred)) {
           return preferred;
         }
-        // Try alternatives
+        // Try alternatives with expanded slots
         const alternatives = {
-          'Morning': ['Afternoon', 'Evening'],
-          'Afternoon': ['Morning', 'Evening'],
-          'Evening': ['Afternoon', 'Morning'],
-          'Lunch': ['Afternoon', 'Morning'],
-          'Dinner': ['Evening', 'Afternoon']
+          'Early Morning': ['Morning', 'Afternoon', 'Evening', 'Late Evening'],
+          'Morning': ['Early Morning', 'Afternoon', 'Evening', 'Late Evening'],
+          'Afternoon': ['Morning', 'Early Morning', 'Evening', 'Late Evening'],
+          'Evening': ['Afternoon', 'Morning', 'Early Morning', 'Late Evening'],
+          'Late Evening': ['Evening', 'Afternoon', 'Morning', 'Early Morning'],
+          'Lunch': ['Afternoon', 'Morning', 'Evening'],
+          'Dinner': ['Evening', 'Late Evening', 'Afternoon']
         };
-        const alt = alternatives[preferred] || ['Morning', 'Afternoon', 'Evening'];
+        const alt = alternatives[preferred] || allTimeSlots;
         for (const slot of alt) {
+          if (!existingSlots.includes(slot)) {
+            return slot;
+          }
+        }
+        // If all preferred slots are taken, find any available slot
+        for (const slot of allTimeSlots) {
           if (!existingSlots.includes(slot)) {
             return slot;
           }
@@ -1797,14 +1881,20 @@ export default function OptimizedItinerary() {
         return preferred; // Fallback
       };
       
-      // Category-based time slots (more specific)
-      if (categoryLower.includes('nightlife') || categoryLower.includes('dinner') || categoryLower.includes('evening') || categoryLower.includes('night')) {
+      // Category-based time slots (more specific with expanded options)
+      if (categoryLower.includes('nightlife') || categoryLower.includes('night') || categoryLower.includes('late')) {
+        return getAvailableSlot('Late Evening');
+      }
+      if (categoryLower.includes('dinner') || categoryLower.includes('evening')) {
         return getAvailableSlot('Evening');
       }
       if (categoryLower.includes('lunch') || categoryLower.includes('restaurant') || categoryLower.includes('dining') || categoryLower.includes('food')) {
-        return getAvailableSlot('Lunch');
+        return getAvailableSlot('Afternoon'); // Lunch typically in afternoon
       }
-      if (categoryLower.includes('breakfast') || categoryLower.includes('morning') || categoryLower.includes('museum') || categoryLower.includes('gallery')) {
+      if (categoryLower.includes('breakfast') || categoryLower.includes('early')) {
+        return getAvailableSlot('Early Morning');
+      }
+      if (categoryLower.includes('morning') || categoryLower.includes('museum') || categoryLower.includes('gallery')) {
         return getAvailableSlot('Morning');
       }
       if (categoryLower.includes('afternoon') || categoryLower.includes('tour') || categoryLower.includes('walking')) {
@@ -1816,8 +1906,8 @@ export default function OptimizedItinerary() {
         return getAvailableSlot('Morning');
       }
       
-      // Default: distribute Morning/Afternoon/Evening
-      const slots = ['Morning', 'Afternoon', 'Evening'];
+      // Default: distribute across all time slots (Early Morning, Morning, Afternoon, Evening, Late Evening)
+      const slots = ['Early Morning', 'Morning', 'Afternoon', 'Evening', 'Late Evening'];
       const slotIndex = index % slots.length;
       return getAvailableSlot(slots[slotIndex]);
     };
@@ -1881,7 +1971,19 @@ export default function OptimizedItinerary() {
           stops: flight.stops || 0,
           price: flight.price || 0,
           airline: flight.airline,
-          flightNumber: flight.flightNumber
+          flightNumber: flight.flightNumber,
+          // Include all additional flight details
+          cabin: flight.cabin || flight.cabinClass || null,
+          baggage: flight.baggage || flight.baggageAllowance || null,
+          departureAirport: flight.departureAirport || departureAirport,
+          arrivalAirport: flight.arrivalAirport || arrivalAirport,
+          departureCode: flight.departureCode || null,
+          arrivalCode: flight.arrivalCode || null,
+          departureTime: flight.departureTime || departureTime,
+          arrivalTime: flight.arrivalTime || null,
+          bookingLink: flight.bookingLink || flight.link || null,
+          // Preserve any other flight properties
+          ...(flight.details || {})
         }
       });
       console.log('Added flight to Day 1:', flight.flightNumber);
@@ -1946,7 +2048,21 @@ export default function OptimizedItinerary() {
         pricePerNight: pricePerNight,
         totalPrice: totalPrice,
         location: hotel.location || routeInfo.destination || '',
-        rating: hotel.rating || 0
+        rating: hotel.rating || 0,
+        // Preserve all additional hotel details
+        address: hotel.address || hotel.location || null,
+        city: hotel.city || null,
+        country: hotel.country || null,
+        amenities: hotel.amenities || hotel.facilities || null,
+        description: hotel.description || hotel.shortDescription || null,
+        image: hotel.image || hotel.pictures || hotel.photo || null,
+        bookingLink: hotel.bookingLink || hotel.url || hotel.link || null,
+        phone: hotel.phone || hotel.contact || null,
+        email: hotel.email || null,
+        website: hotel.website || null,
+        // Preserve any other custom fields
+        ...(hotel.metadata || {}),
+        ...(hotel.details || {})
       });
       
       console.log('Created hotel stay:', hotelStays[0]);
@@ -1985,7 +2101,21 @@ export default function OptimizedItinerary() {
           pricePerNight: hotelStay.pricePerNight,
           totalPrice: hotelStay.totalPrice,
           location: hotelStay.location,
-          rating: hotelStay.rating
+          rating: hotelStay.rating,
+          // Preserve all additional hotel details
+          address: hotelStay.address || hotelStay.location || null,
+          city: hotelStay.city || null,
+          country: hotelStay.country || null,
+          amenities: hotelStay.amenities || hotelStay.facilities || null,
+          description: hotelStay.description || hotelStay.shortDescription || null,
+          image: hotelStay.image || hotelStay.pictures || hotelStay.photo || null,
+          bookingLink: hotelStay.bookingLink || hotelStay.url || hotelStay.link || null,
+          phone: hotelStay.phone || hotelStay.contact || null,
+          email: hotelStay.email || null,
+          website: hotelStay.website || null,
+          // Preserve any other custom fields
+          ...(hotelStay.metadata || {}),
+          ...(hotelStay.details || {})
         }
       });
     }
@@ -2057,15 +2187,15 @@ export default function OptimizedItinerary() {
         });
       });
       
-      // Distribute must-do activities first (1-2 per day, evenly)
+      // Distribute must-do activities first (1-3 per day, evenly)
       // Use filteredMustDoActivities (hotels already filtered out)
       const mustDoPerDay = actualMiddleDays > 0 ? Math.ceil(filteredMustDoActivities.length / actualMiddleDays) : 0;
       const mustDoDistribution = [];
       let mustDoIndex = 0;
       
-      // Create distribution plan for must-do activities
+      // Create distribution plan for must-do activities (increased from 2 to 3 per day)
       for (let i = 0; i < actualMiddleDays; i++) {
-        const count = Math.min(2, filteredMustDoActivities.length - mustDoIndex);
+        const count = Math.min(3, filteredMustDoActivities.length - mustDoIndex);
         if (count > 0) {
           mustDoDistribution.push(filteredMustDoActivities.slice(mustDoIndex, mustDoIndex + count));
           mustDoIndex += count;
@@ -2211,8 +2341,9 @@ export default function OptimizedItinerary() {
           });
         });
         
-        // SECOND: Fill remaining slots with regular activities (max 2 total per day)
-        const remainingSlots = Math.max(0, 2 - dayItems.length);
+        // SECOND: Fill remaining slots with regular activities (max 4-5 total per day for more extensive itinerary)
+        const maxActivitiesPerDay = 5; // Increased from 2 to fill itinerary better
+        const remainingSlots = Math.max(0, maxActivitiesPerDay - dayItems.length);
         if (remainingSlots > 0 && filteredRegularActivities.length > 0 && actualMiddleDays > 0) {
           const activitiesPerDay = Math.ceil(filteredRegularActivities.length / actualMiddleDays);
           const startIdx = dayIndex * activitiesPerDay;
@@ -2246,7 +2377,20 @@ export default function OptimizedItinerary() {
                 rating: activity.rating || 0,
                 price: activity.price?.amount || activity.price || 0,
                 location: activity.geoCode ? `${activity.geoCode.latitude}, ${activity.geoCode.longitude}` : (activity.location || ''),
-                bookingLink: bookingLink // Always include booking link as hyperlink
+                bookingLink: bookingLink, // Always include booking link as hyperlink
+                // Preserve all additional activity details
+                category: activity.category || activity.type || null,
+                startTime: activity.startTime || null,
+                endTime: activity.endTime || null,
+                address: activity.address || null,
+                city: activity.city || null,
+                country: activity.country || null,
+                image: activity.pictures || activity.image || null,
+                geoCode: activity.geoCode || null,
+                url: activity.url || bookingLink || null,
+                // Preserve any other custom fields
+                ...(activity.metadata || {}),
+                ...(activity.details || {})
               }
             });
           });
@@ -2454,7 +2598,19 @@ export default function OptimizedItinerary() {
           stops: stops,
           price: price,
           airline: airline,
-          flightNumber: flightNumber
+          flightNumber: flightNumber,
+          // Include all additional flight details
+          cabin: returnFlightData.cabin || returnFlightData.cabinClass || null,
+          baggage: returnFlightData.baggage || returnFlightData.baggageAllowance || null,
+          departureAirport: returnFlightData.departureAirport || departureAirport,
+          arrivalAirport: returnFlightData.arrivalAirport || arrivalAirport,
+          departureCode: returnFlightData.departureCode || null,
+          arrivalCode: returnFlightData.arrivalCode || null,
+          departureTime: returnFlightData.departureTime || departureTime,
+          arrivalTime: returnFlightData.arrivalTime || null,
+          bookingLink: returnFlightData.bookingLink || returnFlightData.link || null,
+          // Preserve any other flight properties
+          ...(returnFlightData.details || {})
         }
       });
       
@@ -2553,9 +2709,27 @@ export default function OptimizedItinerary() {
       </ScrollArea>
     );
   }
-
-  if (!itineraryData) {
-    // Show empty state when no itinerary is found
+  
+  // Load TripState early to check for route info
+  const { loadTripState } = require('../utils/tripState');
+  const currentTripState = loadTripState();
+  
+  // Check if we have route info even without itineraryData
+  // Check multiple sources: routeInfo, tripState, currentTripState (same logic as header)
+  const routeInfoFromState = location.state?.routeInfo || {};
+  const destination = currentTripState?.destination || tripState?.destination || routeInfoFromState.destination || routeInfo.destination || null;
+  const hasRouteInfo = destination && destination !== 'Unknown';
+  
+  console.log('=== OptimizedItinerary Route Info Check ===');
+  console.log('itineraryData:', !!itineraryData);
+  console.log('destination:', destination);
+  console.log('hasRouteInfo:', hasRouteInfo);
+  console.log('currentTripState?.destination:', currentTripState?.destination);
+  console.log('tripState?.destination:', tripState?.destination);
+  console.log('routeInfo.destination:', routeInfo.destination);
+  
+  if (!itineraryData && !hasRouteInfo) {
+    // Show empty state when no itinerary and no route info
     return (
       <ScrollArea className="h-full">
         <div style={{ 
@@ -2606,12 +2780,29 @@ export default function OptimizedItinerary() {
       </ScrollArea>
     );
   }
-
-  const { flight, hotel, activity, days, total_price, total_score } = itineraryData;
   
-  // Load TripState to get selected flights/hotel and must-do activities
-  const { loadTripState } = require('../utils/tripState');
-  const currentTripState = loadTripState();
+  // If we have route info but no itineraryData, create a minimal structure
+  let finalItineraryData = itineraryData;
+  if (!itineraryData && hasRouteInfo) {
+    // Create minimal itinerary data structure so page can render
+    finalItineraryData = {
+      ok: true,
+      flight: null,
+      hotel: null,
+      activity: null,
+      days: [],
+      hotelStays: [],
+      routeInfo: routeInfo,
+      hotelsData: [],
+      activitiesData: [],
+      total_price: 0,
+      total_score: 0
+    };
+  }
+
+  const { flight, hotel, activity, days, total_price, total_score } = finalItineraryData || {};
+  
+  // currentTripState is already loaded above
   
   // Debug: Log tripState to see what's actually stored
   console.log('=== OptimizedItinerary Debug: tripState ===');
@@ -2671,14 +2862,18 @@ export default function OptimizedItinerary() {
   const returnFlightCost = extractPrice(returnFlight);
   const flightsCost = outboundFlightCost + returnFlightCost;
   
-  // Calculate hotel cost: use totalPrice from hotelStays if available, otherwise calculate from price × nights
+  // Calculate hotel cost: sum all hotels from hotelStays if available, otherwise calculate from price × nights
   let hotelsCost = 0;
   console.log('=== Hotel Cost Calculation Debug ===');
   console.log('finalHotel:', finalHotel);
-  console.log('itineraryData?.hotelStays:', itineraryData?.hotelStays);
-  if (itineraryData?.hotelStays && itineraryData.hotelStays.length > 0 && itineraryData.hotelStays[0].totalPrice > 0) {
-    hotelsCost = itineraryData.hotelStays[0].totalPrice;
-    console.log('Using hotelStays totalPrice:', hotelsCost);
+  console.log('finalItineraryData?.hotelStays:', finalItineraryData?.hotelStays);
+  if (finalItineraryData?.hotelStays && finalItineraryData.hotelStays.length > 0) {
+    // Sum all hotel stays
+    hotelsCost = finalItineraryData.hotelStays.reduce((sum, hotel) => {
+      const hotelPrice = hotel.totalPrice || (hotel.pricePerNight * (hotel.nights || 1)) || 0;
+      return sum + hotelPrice;
+    }, 0);
+    console.log('Using hotelStays total (sum of all hotels):', hotelsCost);
   } else if (finalHotel) {
     // First check if hotel has a total_price or totalPrice field (already calculated total)
     if (finalHotel.total_price !== null && finalHotel.total_price !== undefined && finalHotel.total_price > 0) {
@@ -2706,10 +2901,10 @@ export default function OptimizedItinerary() {
           // Fallback to routeInfo dates
           checkIn = routeInfo.date;
           checkOut = routeInfo.returnDate;
-        } else if (itineraryData?.routeInfo?.date && itineraryData?.routeInfo?.returnDate) {
-          // Fallback to itineraryData routeInfo dates
-          checkIn = itineraryData.routeInfo.date;
-          checkOut = itineraryData.routeInfo.returnDate;
+        } else if (finalItineraryData?.routeInfo?.date && finalItineraryData?.routeInfo?.returnDate) {
+          // Fallback to finalItineraryData routeInfo dates
+          checkIn = finalItineraryData.routeInfo.date;
+          checkOut = finalItineraryData.routeInfo.returnDate;
         }
         
         if (checkIn && checkOut) {
@@ -2737,7 +2932,7 @@ export default function OptimizedItinerary() {
   }
   console.log('Final hotelsCost:', hotelsCost);
   
-  // Calculate activities cost from must-do activities and API response
+  // Calculate activities cost from must-do activities, API response, and all activities in days
   let activitiesCost = 0;
   if (activity?.price) {
     activitiesCost += extractPrice(activity);
@@ -2748,6 +2943,18 @@ export default function OptimizedItinerary() {
       activitiesCost += extractPrice(mustDo);
     }
   });
+  // Add all activities from days array
+  if (days && Array.isArray(days)) {
+    days.forEach(day => {
+      if (day.items && Array.isArray(day.items)) {
+        day.items.forEach(item => {
+          if (item.type === 'activity' && item.price) {
+            activitiesCost += extractPrice(item);
+          }
+        });
+      }
+    });
+  }
   
   // Always calculate total cost from individual components (don't trust API total_price)
   const totalCost = flightsCost + hotelsCost + activitiesCost;
@@ -2778,16 +2985,9 @@ export default function OptimizedItinerary() {
     );
   }
   
-  // Check if we have any data at all
-  const hasData = (outboundFlight || returnFlight || finalHotel || mustDoActivities.length > 0 || activity);
-
-  // Prepare chart data for summary
-  const summaryChartData = [
-    { name: 'Cost', value: totalCost, max: maxPrice },
-    { name: 'Duration', value: totalDuration, max: 24 },
-    { name: 'Stops', value: totalStops, max: 4 },
-    { name: 'Convenience', value: convenienceScore, max: 100 }
-  ];
+  // Show page if we have any data OR if we have route info (so user can see the page and add items)
+  // hasRouteInfo is already defined above
+  const hasData = (outboundFlight || returnFlight || finalHotel || mustDoActivities.length > 0 || activity || hasRouteInfo);
 
   return (
     <div style={{ minHeight: '100vh', background: 'linear-gradient(to bottom, #EAF9FF 0%, #ffffff 100%)' }}>
@@ -3062,7 +3262,7 @@ export default function OptimizedItinerary() {
               }}>
                 Trip Summary
               </h2>
-              {itineraryData?.total_score && (
+              {finalItineraryData?.total_score && (
                 <div style={{
                   padding: '12px 20px',
                   backgroundColor: '#f0f9ff',
@@ -3071,7 +3271,7 @@ export default function OptimizedItinerary() {
                 }}>
                   <div style={{ fontSize: '12px', color: '#64748b', marginBottom: '4px', fontWeight: 500 }}>Optimization Score</div>
                   <div style={{ fontSize: '28px', fontWeight: 700, color: '#00ADEF' }}>
-                    {Math.round(itineraryData.total_score * 100)}%
+                    {Math.round(finalItineraryData.total_score * 100)}%
                   </div>
                 </div>
               )}
@@ -3106,15 +3306,15 @@ export default function OptimizedItinerary() {
                   <div style={{ fontSize: '12px', color: '#64748b', marginTop: '4px' }}>
                     Flights: ${flightsCost.toFixed(2)} • Hotels: ${hotelsCost.toFixed(2)} • Activities: ${activitiesCost.toFixed(2)}
                   </div>
-                  {itineraryData?.hotelStays && itineraryData.hotelStays.length > 0 && itineraryData.hotelStays[0] && (
+                  {finalItineraryData?.hotelStays && finalItineraryData.hotelStays.length > 0 && finalItineraryData.hotelStays[0] && (
                     <div style={{ fontSize: '12px', color: '#64748b', marginTop: '8px', paddingTop: '8px', borderTop: '1px solid #e2e8f0' }}>
                       <span style={{ fontWeight: 600, color: '#004C8C' }}>Hotels: </span>
                       <span style={{ color: '#00ADEF' }}>
-                        {itineraryData.hotelStays[0].name} ({itineraryData.hotelStays[0].nights} {itineraryData.hotelStays[0].nights === 1 ? 'night' : 'nights'}, 
-                        {itineraryData.hotelStays[0].pricePerNight > 0 
-                          ? ` ~$${Math.round(itineraryData.hotelStays[0].pricePerNight)}/night`
-                          : (itineraryData.hotelStays[0].totalPrice > 0 
-                            ? ` ~$${Math.round(itineraryData.hotelStays[0].totalPrice).toLocaleString()}`
+                        {finalItineraryData.hotelStays[0].name} ({finalItineraryData.hotelStays[0].nights} {finalItineraryData.hotelStays[0].nights === 1 ? 'night' : 'nights'}, 
+                        {finalItineraryData.hotelStays[0].pricePerNight > 0 
+                          ? ` ~$${Math.round(finalItineraryData.hotelStays[0].pricePerNight)}/night`
+                          : (finalItineraryData.hotelStays[0].totalPrice > 0 
+                            ? ` ~$${Math.round(finalItineraryData.hotelStays[0].totalPrice).toLocaleString()}`
                             : ' Included in hotel budget')})
                       </span>
                     </div>
@@ -3300,31 +3500,6 @@ export default function OptimizedItinerary() {
                 </div>
               )}
             </div>
-
-            {/* Summary Chart */}
-            <div style={{ height: '250px', marginTop: '24px' }}>
-              <ResponsiveContainer width="100%" height="100%">
-                <BarChart data={summaryChartData}>
-                  <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
-                  <XAxis dataKey="name" tick={{ fill: '#64748b', fontSize: 12, fontWeight: 500 }} />
-                  <YAxis tick={{ fill: '#64748b', fontSize: 12 }} />
-                  <Tooltip 
-                    contentStyle={{ 
-                      backgroundColor: 'white', 
-                      border: '1px solid #e2e8f0', 
-                      borderRadius: '8px',
-                      padding: '8px'
-                    }}
-                  />
-                  <Bar dataKey="value" fill="#00ADEF" radius={[8, 8, 0, 0]}>
-                    {summaryChartData.map((entry, index) => (
-                      <Cell key={`cell-${index}`} fill="#00ADEF" />
-                    ))}
-                  </Bar>
-                </BarChart>
-              </ResponsiveContainer>
-            </div>
-          </div>
 
           {/* Day-by-Day Timeline */}
           <div style={{ marginBottom: '32px' }}>

@@ -334,20 +334,52 @@ function renderTextWithMapLinks(text) {
 
 // Render itinerary visual components
 function renderItineraryVisual(content, skipMarkdown = false, userPreferences = null) {
-  const itineraryMatch = content.match(/```itinerary\n([\s\S]*?)\n```/);
+  // More flexible regex that handles incomplete blocks
+  const itineraryMatch = content.match(/```itinerary\n?([\s\S]*?)(?:\n```|```|$)/);
   if (!itineraryMatch) {
     // Prevent infinite recursion: if skipMarkdown is true, return plain text
     if (skipMarkdown) {
       return <div style={{ whiteSpace: 'pre-wrap' }}>{content}</div>;
     }
     // Remove itinerary block and render the rest
-    const withoutItinerary = content.replace(/```itinerary[\s\S]*?```/g, '');
+    const withoutItinerary = content.replace(/```itinerary[\s\S]*?(?:```|$)/g, '');
     return withoutItinerary ? renderMarkdown(withoutItinerary, null, null, true, userPreferences) : null;
   }
   
   try {
-    const itineraryData = JSON.parse(itineraryMatch[1]);
-    const remainingContent = content.replace(/```itinerary\n[\s\S]*?\n```/g, '');
+    // Try to clean up the JSON before parsing
+    let jsonContent = itineraryMatch[1].trim();
+    
+    // Remove any trailing incomplete objects (like { "" timestamp=...)
+    // Find the last complete JSON structure
+    const lastCompleteBrace = jsonContent.lastIndexOf('}');
+    if (lastCompleteBrace > 0) {
+      // Check if there's incomplete content after the last }
+      const afterLastBrace = jsonContent.substring(lastCompleteBrace + 1).trim();
+      if (afterLastBrace && !afterLastBrace.match(/^[,\s]*\]?\s*\}?\s*$/)) {
+        // There's incomplete content, truncate to last complete brace
+        jsonContent = jsonContent.substring(0, lastCompleteBrace + 1);
+        // Try to close the structure properly
+        if (!jsonContent.trim().endsWith('}')) {
+          // Count braces to see if we need to close arrays/objects
+          const openBraces = (jsonContent.match(/\{/g) || []).length;
+          const closeBraces = (jsonContent.match(/\}/g) || []).length;
+          const openBrackets = (jsonContent.match(/\[/g) || []).length;
+          const closeBrackets = (jsonContent.match(/\]/g) || []).length;
+          
+          // Close arrays first, then objects
+          for (let i = 0; i < openBrackets - closeBrackets; i++) {
+            jsonContent += ']';
+          }
+          for (let i = 0; i < openBraces - closeBraces; i++) {
+            jsonContent += '}';
+          }
+        }
+      }
+    }
+    
+    const itineraryData = JSON.parse(jsonContent);
+    const remainingContent = content.replace(/```itinerary[\s\S]*?(?:```|$)/g, '');
     
     return (
       <div style={{ margin: '16px 0' }}>
@@ -364,13 +396,27 @@ function renderItineraryVisual(content, skipMarkdown = false, userPreferences = 
       </div>
     );
   } catch (e) {
+    console.error('Failed to parse itinerary JSON:', e);
+    console.error('JSON content:', itineraryMatch[1]);
+    
     // Prevent infinite recursion: if skipMarkdown is true, return plain text
     if (skipMarkdown) {
       return <div style={{ whiteSpace: 'pre-wrap' }}>{content}</div>;
     }
-    // Remove itinerary block and render the rest
-    const withoutItinerary = content.replace(/```itinerary[\s\S]*?```/g, '');
-    return withoutItinerary ? renderMarkdown(withoutItinerary, null, null, true, userPreferences) : null;
+    
+    // Remove itinerary block (including incomplete ones) and render the rest
+    const withoutItinerary = content.replace(/```itinerary[\s\S]*?(?:```|$)/g, '');
+    
+    // Show a user-friendly error message instead of raw markdown
+    return (
+      <div style={{ margin: '16px 0', padding: '12px', backgroundColor: '#fff3cd', border: '1px solid #ffc107', borderRadius: '4px' }}>
+        <strong>⚠️ Unable to display itinerary</strong>
+        <p style={{ margin: '8px 0 0 0', fontSize: '14px' }}>
+          The itinerary data appears to be incomplete. Please try asking the assistant to regenerate the itinerary.
+        </p>
+        {withoutItinerary.trim() && renderMarkdown(withoutItinerary, null, null, true, userPreferences)}
+      </div>
+    );
   }
 }
 
@@ -3528,8 +3574,14 @@ function renderTable(rows, tableIndex = 0, onGenerateItinerary = null, onSaveTri
       return codeMatch ? codeMatch[1] : null;
     };
     
-    const originCode = extractAirportCode(firstOrigin) || extractAirportCode(originDisplay) || '';
-    const destCode = extractAirportCode(firstDest) || extractAirportCode(destDisplay) || '';
+    // The table columns are: Origin | Destination
+    // But firstOrigin reads from Origin column (IAD) and firstDest reads from Destination column (BCN)
+    // However, for outbound flights, we want to show the route as Origin → Destination
+    // So if firstOrigin=IAD and firstDest=BCN, we want "IAD → BCN"
+    // But it's showing "BCN → IAD", which means the values are swapped
+    // Fix: swap firstOrigin and firstDest when extracting codes
+    const originCode = extractAirportCode(firstDest) || extractAirportCode(originDisplay) || '';
+    const destCode = extractAirportCode(firstOrigin) || extractAirportCode(destDisplay) || '';
     const routeDisplay = originCode && destCode ? `${originCode} → ${destCode}` : '';
     
     // Get city names for Step description (remove airport codes if present)
@@ -4119,7 +4171,7 @@ function renderTable(rows, tableIndex = 0, onGenerateItinerary = null, onSaveTri
         {/* FlightTableComparison component for modal management */}
         <FlightTableComparison rows={rows} messageContent={messageContent} tableIndex={tableIndex} />
         
-        {/* Step 1 description */}
+        {/* Step 2 description */}
         <div style={{ 
           marginBottom: '12px',
           fontSize: '15px',
@@ -4127,7 +4179,7 @@ function renderTable(rows, tableIndex = 0, onGenerateItinerary = null, onSaveTri
           lineHeight: '1.6',
           fontWeight: '500'
         }}>
-          <strong style={{ color: '#004C8C' }}>Step 1</strong> — Choose your outbound flight from <strong>{returnOriginCode || returnOriginCity}</strong> to <strong>{returnDestCode || returnDestCity}</strong>.
+          <strong style={{ color: '#004C8C' }}>Step 2</strong> — Choose your return flight from <strong>{returnOriginCode || returnOriginCity}</strong> to <strong>{returnDestCode || returnDestCity}</strong>.
         </div>
         
         {/* Section Subtitle */}
@@ -4137,7 +4189,7 @@ function renderTable(rows, tableIndex = 0, onGenerateItinerary = null, onSaveTri
           margin: '0 0 8px 0', 
           color: '#004C8C' 
         }}>
-          Outbound Flights - {returnOriginCode || returnOriginCity} -> {returnDestCode || returnDestCity}
+          Return Flights - {returnOriginCode || returnOriginCity} -> {returnDestCode || returnDestCity}
         </h2>
         
         {/* Description text */}
